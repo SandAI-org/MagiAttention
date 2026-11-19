@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-from dataclasses import dataclass
 from functools import partial
 from itertools import product
 
@@ -47,21 +46,8 @@ from magi_attention.testing.utils import (
     switch_kernel_backend_context,
 )
 
-
-@dataclass(frozen=True)
-class FullAttnCase:
-    num_heads: tuple[int, int]
-    head_dim: int
-    backend: MagiAttentionKernelBackend
-    use_hier_comm: bool
-    use_native_grpcoll: bool
-    dtype: torch.dtype
-    softcap: float = 0.0
-    seqlen_sink: int | None = None
-
-
 FULL_ATTN_CASES = [
-    FullAttnCase(*args)
+    (*args, 0.0, None)
     for args in product(
         [(8, 8), (8, 4)],
         [128, 64],
@@ -75,17 +61,26 @@ FULL_ATTN_CASES = [
         [torch.float16, torch.bfloat16],
     )
 ] + [
-    FullAttnCase(
-        num_heads=(8, 4),
-        head_dim=128,
-        backend=MagiAttentionKernelBackend.CUTEDSL,
-        use_hier_comm=False,
-        use_native_grpcoll=False,
-        dtype=torch.bfloat16,
-        softcap=30.0,
-        seqlen_sink=seqlen_sink,
-    )
-    for seqlen_sink in (0, 4)
+    (
+        (8, 4),
+        128,
+        MagiAttentionKernelBackend.CUTEDSL,
+        False,
+        False,
+        torch.bfloat16,
+        30.0,
+        0,
+    ),
+    (
+        (8, 4),
+        128,
+        MagiAttentionKernelBackend.CUTEDSL,
+        False,
+        False,
+        torch.bfloat16,
+        30.0,
+        4,
+    ),
 ]
 
 
@@ -241,26 +236,33 @@ class TestDistAttn(DistTestBase):
     @skip_if_lt_x_gpu(4)
     @with_comms
     @parameterize("case", FULL_ATTN_CASES)
-    def test_full_attn(self, case: FullAttnCase):
+    def test_full_attn(self, case):
+        (
+            (nhq, nhk),
+            head_dim,
+            backend,
+            use_hier_comm,
+            use_native_grpcoll,
+            dtype,
+            softcap,
+            seqlen_sink,
+        ) = case
         # FFA is SM90 only; the CUTEDSL range kernels with per-range mask types
         # are SM100/SM110 only. Return rather than skipTest: a SkipTest inside
         # one combination aborts every remaining combination of this method.
         major, minor = torch.cuda.get_device_capability()
-        backend = case.backend
         if backend == MagiAttentionKernelBackend.FFA and (major, minor) != (9, 0):
             return
         if backend == MagiAttentionKernelBackend.CUTEDSL and major not in (10, 11):
             return
 
-        if case.seqlen_sink is None:
+        if seqlen_sink is None:
             flag_comb = next(self.flag_iterator)
             seqlen_sink = flag_comb["seqlen_sink"]
             return_max_logits = flag_comb["return_max_logits"]
         else:
-            seqlen_sink = case.seqlen_sink
             return_max_logits = False
-        use_hier_comm = case.use_hier_comm
-        use_native_grpcoll = case.use_native_grpcoll and self.native_grpcoll_registered
+        use_native_grpcoll &= self.native_grpcoll_registered
 
         is_sdpa_backend = backend == MagiAttentionKernelBackend.SDPA
 
@@ -286,8 +288,6 @@ class TestDistAttn(DistTestBase):
         )
 
         # prepare meta and runtime
-        nhq, nhk = case.num_heads
-        head_dim, dtype, softcap = case.head_dim, case.dtype, case.softcap
         dist_attn_runtime = self._full_attn_runtime(nhq, nhk, head_dim, use_hier_comm)
 
         # prepare data
