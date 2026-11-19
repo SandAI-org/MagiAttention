@@ -13,8 +13,9 @@
 # limitations under the License.
 
 import os
-import unittest
+from dataclasses import dataclass
 from functools import partial
+from itertools import product
 
 import torch
 import torch.distributed as dist
@@ -33,7 +34,6 @@ from magi_attention.functional.dist_attn_runtime import DistAttnRuntime
 from magi_attention.meta.collection.calc_meta import AttnArg, CalcMeta
 from magi_attention.meta.collection.comm_meta import CommMeta, GroupCollectiveArg
 from magi_attention.testing import parameterize, ref_attn_func
-from magi_attention.testing.cutedsl_utils import SM100_FAMILY_REQUIRED, is_sm100_family
 from magi_attention.testing.dist_common import (
     DistTestBase,
     should_run_test_case,
@@ -42,11 +42,51 @@ from magi_attention.testing.dist_common import (
 from magi_attention.testing.flag_generator import FlagCombGenerator
 from magi_attention.testing.precision import EPSILON, assert_close
 from magi_attention.testing.utils import (
-    switch_env,
     switch_envvar_context,
     switch_envvars,
     switch_kernel_backend_context,
 )
+
+
+@dataclass(frozen=True)
+class FullAttnCase:
+    num_heads: tuple[int, int]
+    head_dim: int
+    backend: MagiAttentionKernelBackend
+    use_hier_comm: bool
+    use_native_grpcoll: bool
+    dtype: torch.dtype
+    softcap: float = 0.0
+    seqlen_sink: int | None = None
+
+
+FULL_ATTN_CASES = [
+    FullAttnCase(*args)
+    for args in product(
+        [(8, 8), (8, 4)],
+        [128, 64],
+        [
+            MagiAttentionKernelBackend.FFA,
+            MagiAttentionKernelBackend.SDPA,
+            MagiAttentionKernelBackend.CUTEDSL,
+        ],
+        [False, True],
+        [False, True],
+        [torch.float16, torch.bfloat16],
+    )
+] + [
+    FullAttnCase(
+        num_heads=(8, 4),
+        head_dim=128,
+        backend=MagiAttentionKernelBackend.CUTEDSL,
+        use_hier_comm=False,
+        use_native_grpcoll=False,
+        dtype=torch.bfloat16,
+        softcap=30.0,
+        seqlen_sink=seqlen_sink,
+    )
+    for seqlen_sink in (0, 4)
+]
 
 
 class TestDistAttn(DistTestBase):
@@ -200,41 +240,27 @@ class TestDistAttn(DistTestBase):
 
     @skip_if_lt_x_gpu(4)
     @with_comms
-    @parameterize("num_heads", [(8, 8), (8, 4)])
-    @parameterize("head_dim", [128, 64])
-    @parameterize(
-        "backend",
-        [
-            MagiAttentionKernelBackend.FFA,
-            MagiAttentionKernelBackend.SDPA,
-            MagiAttentionKernelBackend.CUTEDSL,
-        ],
-    )
-    @parameterize("use_hier_comm", [False, True])
-    @parameterize("use_native_grpcoll", [False, True])
-    @parameterize("dtype", [torch.float16, torch.bfloat16])
-    def test_full_attn(
-        self,
-        num_heads: tuple[int, int],
-        head_dim: int,
-        backend: MagiAttentionKernelBackend,
-        use_hier_comm: bool,
-        use_native_grpcoll: bool,
-        dtype: torch.dtype,
-    ):
+    @parameterize("case", FULL_ATTN_CASES)
+    def test_full_attn(self, case: FullAttnCase):
         # FFA is SM90 only; the CUTEDSL range kernels with per-range mask types
         # are SM100/SM110 only. Return rather than skipTest: a SkipTest inside
         # one combination aborts every remaining combination of this method.
         major, minor = torch.cuda.get_device_capability()
+        backend = case.backend
         if backend == MagiAttentionKernelBackend.FFA and (major, minor) != (9, 0):
             return
         if backend == MagiAttentionKernelBackend.CUTEDSL and major not in (10, 11):
             return
 
-        flag_comb = next(self.flag_iterator)
-        seqlen_sink = flag_comb["seqlen_sink"]
-        return_max_logits = flag_comb["return_max_logits"]
-        use_native_grpcoll &= self.native_grpcoll_registered
+        if case.seqlen_sink is None:
+            flag_comb = next(self.flag_iterator)
+            seqlen_sink = flag_comb["seqlen_sink"]
+            return_max_logits = flag_comb["return_max_logits"]
+        else:
+            seqlen_sink = case.seqlen_sink
+            return_max_logits = False
+        use_hier_comm = case.use_hier_comm
+        use_native_grpcoll = case.use_native_grpcoll and self.native_grpcoll_registered
 
         is_sdpa_backend = backend == MagiAttentionKernelBackend.SDPA
 
@@ -260,13 +286,16 @@ class TestDistAttn(DistTestBase):
         )
 
         # prepare meta and runtime
-        nhq, nhk = num_heads
+        nhq, nhk = case.num_heads
+        head_dim, dtype, softcap = case.head_dim, case.dtype, case.softcap
         dist_attn_runtime = self._full_attn_runtime(nhq, nhk, head_dim, use_hier_comm)
 
         # prepare data
-        local_q = torch.randn(
-            128, nhq, head_dim, device=self.device, dtype=dtype, requires_grad=True
-        )
+        local_q = torch.randn(128, nhq, head_dim, device=self.device, dtype=dtype)
+        if softcap > 0.0:
+            # Increase the logit magnitude so the cap has a measurable effect.
+            local_q.mul_(4.0)
+        local_q.requires_grad_()
         local_k = torch.randn(
             128, nhk, head_dim, device=self.device, dtype=dtype, requires_grad=True
         )
@@ -293,6 +322,7 @@ class TestDistAttn(DistTestBase):
             v=local_v,
             dist_attn_runtime=dist_attn_runtime,
             sink=total_sink,
+            softcap=softcap,
             return_max_logits=return_max_logits,
         )
         local_lse = meta.lse
@@ -328,9 +358,10 @@ class TestDistAttn(DistTestBase):
             v=total_v,
             mask=total_mask,
             sink=total_sink,
+            softcap=softcap,
             layout="thd",
             sink_layout="sh",
-            backend="torch" if total_sink is not None else "sdpa",
+            backend="torch" if softcap > 0.0 or total_sink is not None else "sdpa",
             high_precision=True,
             return_lse=True,
             return_max_logits=return_max_logits,
@@ -401,109 +432,6 @@ class TestDistAttn(DistTestBase):
             test_case="dv",
         )
         if total_sink is not None:
-            assert_close(
-                total_dsink,
-                total_dsink_ref,
-                atol=5e-3,
-                rtol=0.1,
-                mismatch_threshold=max(1 / (seqlen_sink * nhq), 5e-2),
-                test_case="dsink",
-            )
-
-    @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-    @skip_if_lt_x_gpu(4)
-    @with_comms
-    @switch_env("MAGI_ATTENTION_KERNEL_BACKEND", MagiAttentionKernelBackend.CUTEDSL)
-    @parameterize("seqlen_sink", [0, 4])
-    def test_cutedsl_softcap(self, seqlen_sink: int):
-        """Compare merged local and remote stages to GQA with the sink counted once."""
-        softcap, nhq, nhk, head_dim, dtype = 30.0, 8, 4, 128, torch.bfloat16
-        dist_attn_runtime = self._full_attn_runtime(nhq, nhk, head_dim, False)
-
-        # Larger logits make the difference from uncapped attention measurable.
-        local_q = (
-            4.0 * torch.randn(128, nhq, head_dim, device=self.device, dtype=dtype)
-        ).requires_grad_()
-        local_k, local_v = (
-            torch.randn(
-                128, nhk, head_dim, device=self.device, dtype=dtype, requires_grad=True
-            )
-            for _ in range(2)
-        )
-        total_sink = None
-        if seqlen_sink > 0:
-            total_sink = torch.randn(
-                seqlen_sink, nhq, device=self.device, dtype=torch.float32
-            )
-            dist.all_reduce(total_sink, group=self.nccl_group)
-            total_sink.requires_grad_()
-
-        local_out, meta = dist_attn_func(
-            q=local_q,
-            k=local_k,
-            v=local_v,
-            dist_attn_runtime=dist_attn_runtime,
-            sink=total_sink,
-            softcap=softcap,
-        )
-        total_out = torch.cat(all_gather(local_out, group=self.nccl_group), dim=0)
-        total_lse = torch.cat(all_gather(meta.lse, group=self.nccl_group), dim=0)
-        grad_total_out = torch.randn_like(total_out)
-        total_out.backward(grad_total_out)
-        grads = [t.grad for t in (local_q, local_k, local_v)]
-        for t in (local_q, local_k, local_v):
-            t.grad = None
-        total_dsink = None
-        if total_sink is not None:
-            total_dsink, total_sink.grad = total_sink.grad, None
-        total_q, total_k, total_v = (
-            torch.cat(all_gather(t, group=self.nccl_group), dim=0)
-            for t in (local_q, local_k, local_v)
-        )
-        total_out_ref, meta_ref = ref_attn_func(
-            q=total_q,
-            k=total_k,
-            v=total_v,
-            mask=torch.ones(512, 512, device=self.device).bool(),
-            sink=total_sink,
-            softcap=softcap,
-            layout="thd",
-            sink_layout="sh",
-            backend="torch",
-            high_precision=True,
-            return_lse=True,
-        )
-        total_out_ref.backward(grad_total_out)
-        grads_ref = [t.grad for t in (local_q, local_k, local_v)]
-
-        assert_close(
-            total_out,
-            total_out_ref,
-            atol=EPSILON,
-            rtol=5e-2,
-            mismatch_threshold=0.08,
-            test_case="out",
-        )
-        assert_close(
-            total_lse,
-            meta_ref.lse,
-            atol=EPSILON,
-            rtol=5e-3,
-            mismatch_threshold=0.01,
-            test_case="lse",
-        )
-        for name, grad, grad_ref in zip(("dq", "dk", "dv"), grads, grads_ref):
-            assert_close(
-                grad,
-                grad_ref,
-                atol=EPSILON,
-                rtol=5e-2,
-                mismatch_threshold=0.08,
-                test_case=name,
-            )
-        if total_sink is not None:
-            total_dsink_ref = total_sink.grad
-            dist.all_reduce(total_dsink_ref, group=self.nccl_group)
             assert_close(
                 total_dsink,
                 total_dsink_ref,
