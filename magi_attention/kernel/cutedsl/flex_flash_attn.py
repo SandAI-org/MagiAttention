@@ -54,8 +54,6 @@ from .ffa_utils import (
     MT_MAP,
     TorchFlexAttnArgs,
     convert_from_dlpack_leading_static,
-    create_softcap_scoremod,
-    create_softcap_scoremod_bwd,
     get_device_arch,
     hash_callable,
     is_ffa_2cta_disabled,
@@ -236,6 +234,8 @@ def _flex_flash_attn_fwd(
     block_sparse_tensors = flex_attn_args.block_sparse_tensors
     softcap = normalize_softcap(softcap)
     if softcap is not None:
+        if major_arch not in (10, 11):
+            raise NotImplementedError("softcap requires SM100/SM110")
         assert score_mod is None, "softcap and score_mod cannot be used together"
 
     q, k, v = [maybe_contiguous(t) for t in (q, k, v)]
@@ -529,12 +529,7 @@ def _flex_flash_attn_fwd(
     if out_torch_dtype is torch.float32 and not fwd_fp32_o_borrow_kv:
         q_stage = 1
 
-    if softcap is not None:
-        if major_arch not in (10, 11):
-            # Only the SM100/SM110 kernel caps scores natively; the other
-            # architectures route the cap through the score_mod slot.
-            score_mod = create_softcap_scoremod(softcap)
-    elif score_mod is not None:
+    if score_mod is not None:
         if major_arch == 8:
             raise NotImplementedError(
                 "Custom user-provided score_mod is not supported on SM8x architectures."
@@ -973,6 +968,8 @@ def _flex_flash_attn_bwd(
     softcap_value = normalize_softcap(softcap)
     has_softcap = softcap_value is not None
     if has_softcap:
+        if major_arch not in (10, 11):
+            raise NotImplementedError("softcap requires SM100/SM110")
         assert (
             score_mod is None and score_mod_bwd is None
         ), "softcap and score_mod/score_mod_bwd cannot be used together"
@@ -1231,11 +1228,6 @@ def _flex_flash_attn_bwd(
             "per KV head: MHA, or GQA with cat_gqa or bwd_pack_factor > 1"
         )
 
-    if has_softcap and major_arch not in (10, 11):
-        # Only the SM100/SM110 kernel caps scores natively; the other
-        # architectures route the cap through the score_mod slot.
-        score_mod = create_softcap_scoremod(softcap_value)
-        score_mod_bwd = create_softcap_scoremod_bwd(softcap_value)
     if score_mod is not None:
         assert (
             score_mod_bwd is not None
@@ -1979,8 +1971,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
     :class:`TorchFlexAttnArgs` (``flex_attn_args``) to keep the common
     signature clean.
 
-    ``softcap`` is a native kernel feature on SM100/SM110 and is routed
-    through the score_mod slot on the other architectures.
+    ``softcap`` is a native kernel feature on SM100/SM110 only.
     """
 
     @staticmethod
@@ -2203,7 +2194,8 @@ def flex_flash_attn_func(
         to each scaled score before masking. Zero or ``None`` disables it.
         SM100/SM110 apply the cap natively for dense attention, per-range
         ``mask_types``, and RangeMerge, with the same 2-CTA and head_dim
-        coverage as uncapped kernels. Other architectures use ``score_mod``.
+        coverage as uncapped kernels. Other architectures raise
+        ``NotImplementedError``.
         An enabled cap cannot be combined with a user ``score_mod``.
 
     pack_gqa: fold the q heads of one kv head into the M dimension of the
