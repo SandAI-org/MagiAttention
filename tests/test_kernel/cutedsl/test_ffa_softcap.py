@@ -22,28 +22,31 @@ import torch
 from einops import rearrange
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.common import AttnRanges
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
 from magi_attention.kernel.cutedsl.ffa_utils import (
     MT_MAP,
     TorchFlexAttnArgs,
     normalize_softcap,
 )
-from magi_attention.testing import parameterize, ref_attn_func
+from magi_attention.testing import parameterize
 from magi_attention.testing.cutedsl_utils import (
+    DSINK_ATOL,
+    DSINK_RTOL,
     SM100_FAMILY_REQUIRED,
+    AttnTensors,
     CuteDSLDistTestBase,
+    assert_close_to_torch_ref,
+    dsink_reference,
     is_sm100_family,
     record_bwd_kernels,
     record_fwd_kernels,
+    torch_reference_out_lse,
 )
 from magi_attention.testing.dist_common import with_run_in_mp
-from magi_attention.testing.precision import calc_inf_norm
-from magi_attention.utils import make_attn_mask_from_ffa_args
+from magi_attention.testing.precision import assert_close, assert_equal
 
 _SOFTCAP = 30.0
-# The kernel may exceed the low-precision reference error by this factor.
-_NORM_RATIO = 2.0
+_LSE_ATOL = _LSE_RTOL = 1e-3
 
 
 @contextmanager
@@ -78,7 +81,7 @@ class TestNormalizeSoftcap(unittest.TestCase):
 
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestFfaSoftcap(CuteDSLDistTestBase):
+class TestFFASoftcap(CuteDSLDistTestBase):
     def assert_close_to_ref(
         self,
         *,
@@ -97,52 +100,53 @@ class TestFfaSoftcap(CuteDSLDistTestBase):
         softcap: float = _SOFTCAP,
         softmax_scale: float | None = None,
     ) -> None:
-        """Use the input-dtype reference error against fp64 as the error budget."""
-        mask = make_attn_mask_from_ffa_args(
-            q_ranges=AttnRanges.from_ranges(q_ranges),
-            k_ranges=AttnRanges.from_ranges(k_ranges),
+        """O and dQ/dK/dV against the shared torch references; ``lse`` against
+        the fp64 reference; dsink (the fourth gradient) against the closed form
+        evaluated on this call's O and ``lse``."""
+        out = out.detach()
+        dq, dk, dv = grads[:3]
+        assert_close_to_torch_ref(
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            actual=AttnTensors(out, dq, dk, dv),
+            q_ranges=q_ranges,
+            k_ranges=k_ranges,
             attn_type_map=attn_type_map,
-            total_seqlen_q=q.shape[0],
-            total_seqlen_k=k.shape[0],
-            device=q.device,
+            test_case=test_case,
+            sink=sink,
+            softcap=softcap,
+            softmax_scale=softmax_scale,
         )
-
-        with_dsink = len(grads) == 4
-
-        def ref(high_precision: bool) -> tuple[torch.Tensor, ...]:
-            inputs = [t.detach().clone().requires_grad_() for t in (q, k, v)]
-            sink_ref = None
-            if sink is not None:
-                sink_ref = sink.detach().clone().requires_grad_(with_dsink)
-                if with_dsink:
-                    inputs.append(sink_ref)
-            out_ref, meta_ref = ref_attn_func(
-                q=inputs[0],
-                k=inputs[1],
-                v=inputs[2],
-                mask=mask,
-                sink=sink_ref,
+        if lse is not None:
+            _, lse_ref = torch_reference_out_lse(
+                q=q,
+                k=k,
+                v=v,
+                q_ranges=q_ranges,
+                k_ranges=k_ranges,
+                sink=sink,
+                attn_type_map=attn_type_map,
                 softcap=softcap,
                 softmax_scale=softmax_scale,
-                layout="thd",
-                backend="torch",
-                high_precision=high_precision,
-                return_lse=True,
             )
-            grads_ref = torch.autograd.grad(out_ref, inputs, do)
-            return (out_ref, *grads_ref, meta_ref.lse)
-
-        refs_hi, refs_lo = ref(True), ref(False)
-        if lse is not None:
-            lse_ref = refs_hi[-1].to(lse.dtype)
-            torch.testing.assert_close(
-                lse, lse_ref, atol=1e-3, rtol=1e-3, msg=test_case
+            assert_close(
+                lse,
+                lse_ref,
+                atol=_LSE_ATOL,
+                rtol=_LSE_RTOL,
+                test_case=f"{test_case} => lse",
             )
-        names = ("out", "dq", "dk", "dv", "dsink")[: 1 + len(grads)]
-        for name, actual, hi, lo in zip(names, (out, *grads), refs_hi, refs_lo):
-            err = calc_inf_norm(actual.to(hi.dtype), hi)
-            bound = _NORM_RATIO * calc_inf_norm(lo, hi) + 1e-4 * hi.abs().max().item()
-            self.assertLessEqual(err, bound, f"{test_case} {name}: {err=} {bound=}")
+        if len(grads) == 4:
+            assert sink is not None and lse is not None, test_case
+            assert_close(
+                grads[3],
+                dsink_reference(out, do, lse, sink),
+                atol=DSINK_ATOL,
+                rtol=DSINK_RTOL,
+                test_case=f"{test_case} => dsink",
+            )
 
     def _log_ran(self, test_case: str) -> None:
         print(f"[RANK {self.rank}] ran {test_case}", flush=True)
@@ -544,7 +548,11 @@ class TestFfaSoftcap(CuteDSLDistTestBase):
             "softcap=0.0 built a capped kernel",
         )
         out_default, _ = flex_flash_attn_func(q, k, v, **kwargs)
-        self.assertTrue(torch.equal(out, out_default))
+        assert_equal(
+            out,
+            out_default,
+            test_case="[test_zero_softcap_builds_the_uncapped_kernel]",
+        )
 
     @with_run_in_mp
     def test_softcap_rejects_a_user_score_mod(self):

@@ -416,9 +416,6 @@ class TestCutedslFwdStorePath(TestCase):
         self._run_case(name, num_heads_q=4, num_heads_kv=2, num_sinks=2)
 
 
-@unittest.skipUnless(
-    torch.cuda.is_available(), "cutedsl_fwd and cutedsl_bwd take CUDA tensors"
-)
 class TestCutedslSoftcapInput(TestCase):
     """cutedsl_fwd and cutedsl_bwd reject the same softcap values, so a
     negative or NaN cap never runs the forward uncapped."""
