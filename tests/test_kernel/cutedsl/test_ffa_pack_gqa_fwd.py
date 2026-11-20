@@ -140,7 +140,7 @@ def _range_args(relations: Relations, device="cuda") -> dict:
     )
 
 
-class TestFfaPackGqaFwd(TestCase):
+class TestFFAPackGqaFwd(TestCase):
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("the range atomic fwd requires SM100/SM110")

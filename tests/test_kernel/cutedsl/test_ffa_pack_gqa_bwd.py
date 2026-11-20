@@ -63,7 +63,7 @@ def _contiguous_ranges(lengths: list[int]) -> list[list[int]]:
 
 
 @unittest.skipUnless(is_blackwell(), "requires Blackwell")
-class TestFfaPackGqaBwd(DistTestBase):
+class TestFFAPackGqaBwd(DistTestBase):
     @property
     def seed(self) -> int:
         return 42
