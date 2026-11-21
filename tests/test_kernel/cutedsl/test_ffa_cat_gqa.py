@@ -43,7 +43,7 @@ def _maybe_disable_2cta(disable: bool) -> switch_env:
 
 
 @unittest.skipUnless(is_blackwell(), "requires Blackwell")
-class TestFfaCatGqa(DistTestBase):
+class TestFFACatGqa(DistTestBase):
     @property
     def seed(self) -> int:
         return 42

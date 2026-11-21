@@ -63,7 +63,7 @@ def _contiguous_ranges(lengths: list[int]) -> list[list[int]]:
 
 
 @unittest.skipUnless(is_blackwell(), "requires Blackwell")
-class TestFfaPackGqaBwd(DistTestBase):
+class TestFFAPackGqaBwd(DistTestBase):
     @property
     def seed(self) -> int:
         return 42
@@ -850,7 +850,6 @@ class TestSelectBwdGqaFold(TestCase):
             has_block_sparse=False,
             has_mask_mod=False,
             has_score_mod=False,
-            has_softcap=False,
             deterministic=False,
             num_head=8,
             num_head_kv=2,
@@ -895,7 +894,6 @@ class TestSelectBwdGqaFold(TestCase):
             dict(has_block_sparse=True),
             dict(has_mask_mod=True),
             dict(has_score_mod=True),
-            dict(has_softcap=True),
             dict(deterministic=True),
         ):
             self.assertEqual(self._select(**scope), BwdGqaFold(4), str(scope))

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -226,6 +227,8 @@ def _torch_reference(
     sink: torch.Tensor | None,
     mask: torch.Tensor,
     high_precision: bool,
+    softcap: float,
+    softmax_scale: float | None,
 ) -> AttnTensors:
     q_ref, k_ref, v_ref = (t.detach().clone().requires_grad_() for t in (q, k, v))
     out, _ = ref_attn_func(
@@ -234,9 +237,11 @@ def _torch_reference(
         v=v_ref,
         mask=mask,
         sink=sink,
+        softcap=softcap,
+        softmax_scale=softmax_scale,
         layout="thd",
-        # The sdpa reference has no sink support.
-        backend="sdpa" if sink is None else "torch",
+        # The sdpa reference supports neither sink nor softcap.
+        backend="sdpa" if sink is None and softcap == 0.0 else "torch",
         high_precision=high_precision,
     )
     grads = torch.autograd.grad(out, (q_ref, k_ref, v_ref), do.to(out.dtype))
@@ -295,11 +300,14 @@ def assert_close_to_torch_ref(
     attn_type_map: list[int],
     test_case: str,
     sink: torch.Tensor | None = None,
+    softcap: float = 0.0,
+    softmax_scale: float | None = None,
 ) -> None:
     """Compare a call against fp64 and input-dtype torch references.
 
     All tensors use the packed thd layout; ``q_ranges``/``k_ranges`` and
-    ``attn_type_map`` describe the mask in FFA form.
+    ``attn_type_map`` describe the mask in FFA form. ``softcap`` and
+    ``softmax_scale`` take the meaning of the kernel arguments.
     """
     mask = make_attn_mask_from_ffa_args(
         q_ranges=AttnRanges.from_ranges(q_ranges),
@@ -311,7 +319,15 @@ def assert_close_to_torch_ref(
     )
     references = [
         _torch_reference(
-            q=q, k=k, v=v, do=do, sink=sink, mask=mask, high_precision=high_precision
+            q=q,
+            k=k,
+            v=v,
+            do=do,
+            sink=sink,
+            mask=mask,
+            high_precision=high_precision,
+            softcap=softcap,
+            softmax_scale=softmax_scale,
         )
         for high_precision in (True, False)
     ]
@@ -328,15 +344,21 @@ def torch_reference_out_lse(
     q_ranges: Ranges,
     k_ranges: Ranges,
     sink: torch.Tensor | None = None,
+    attn_type_map: list[int] | None = None,
+    softcap: float = 0.0,
+    softmax_scale: float | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """fp64-computed fp32 ``(out, lse)`` of full-mask relations, thd layout.
+    """fp64-computed fp32 ``(out, lse)``, thd layout.
 
-    Rows without any key get ``out = 0`` and the sink-only (or ``-inf``) LSE.
+    ``attn_type_map`` defaults to a full mask for every relation. Rows without
+    any key get ``out = 0`` and the sink-only (or ``-inf``) LSE.
     """
     mask = make_attn_mask_from_ffa_args(
         q_ranges=AttnRanges.from_ranges(q_ranges),
         k_ranges=AttnRanges.from_ranges(k_ranges),
-        attn_type_map=[MT_MAP.full] * len(q_ranges),
+        attn_type_map=(
+            [MT_MAP.full] * len(q_ranges) if attn_type_map is None else attn_type_map
+        ),
         total_seqlen_q=q.shape[0],
         total_seqlen_k=k.shape[0],
         device=q.device,
@@ -347,6 +369,8 @@ def torch_reference_out_lse(
         v=v.detach().float(),
         mask=mask,
         sink=sink,
+        softcap=softcap,
+        softmax_scale=softmax_scale,
         layout="thd",
         backend="torch",
         high_precision=True,
@@ -354,3 +378,25 @@ def torch_reference_out_lse(
     )
     assert meta.lse is not None
     return out, meta.lse
+
+
+def dsink_reference(
+    out: torch.Tensor, dout: torch.Tensor, lse: torch.Tensor, sink: torch.Tensor
+) -> torch.Tensor:
+    """fp64 ``dsink[s, h] = -sum_q sum_d(O * dO) * exp(sink[s, h] - LSE[q, h])``
+    over thd ``out``/``dout`` and ``[total_q, num_heads]`` ``lse``.
+
+    Rows with LSE = -inf have no keys and contribute nothing.
+    """
+    has_keys = lse != -math.inf
+    delta = (
+        out.double().masked_fill(~has_keys[..., None], 0)
+        * dout.double().masked_fill(~has_keys[..., None], 0)
+    ).sum(dim=-1)
+    probability = torch.exp(sink.double()[None] - lse.double()[:, None])
+    probability = probability.masked_fill(~has_keys[:, None], 0)
+    return -(delta[:, None] * probability).sum(dim=0).float()
+
+
+DSINK_ATOL = 2e-4
+DSINK_RTOL = 0.1

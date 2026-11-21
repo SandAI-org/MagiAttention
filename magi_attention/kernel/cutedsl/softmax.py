@@ -724,3 +724,37 @@ def apply_score_mod_bwd_inner(
         grad_vec.store(grad_out_ssa)
         for j in cutlass.range(vec_size, unroll_full=True):
             grad_tensor[i + j] = grad_vec[j]
+
+
+@cute.jit
+def apply_softcap(acc_S: cute.Tensor, softcap_scale: Float32):
+    """Store tanh(raw score * softmax_scale / softcap) before masking.
+
+    The exp2 scale supplies the outer factor of ``softcap``. Applying tanh
+    after masking would turn masked scores from -inf into -1.
+    """
+    for i in cutlass.range(0, cute.size(acc_S.shape), 2, unroll_full=True):
+        s0, s1 = cute.arch.mul_packed_f32x2(
+            (acc_S[i], acc_S[i + 1]), (softcap_scale, softcap_scale)
+        )
+        acc_S[i] = cutedsl_utils.tanh_approx(s0)
+        acc_S[i + 1] = cutedsl_utils.tanh_approx(s1)
+
+
+@cute.jit
+def apply_softcap_bwd(acc_S: cute.Tensor, dtanh: cute.Tensor, softcap_scale: Float32):
+    """Apply the forward transform and save its tanh derivative before P overwrites S.
+
+    The epilogue supplies ``softmax_scale``, so dS only needs the saved
+    ``1 - tanh^2`` factor.
+    """
+    for i in cutlass.range(0, cute.size(acc_S.shape), 2, unroll_full=True):
+        s0, s1 = cute.arch.mul_packed_f32x2(
+            (acc_S[i], acc_S[i + 1]), (softcap_scale, softcap_scale)
+        )
+        t0 = cutedsl_utils.tanh_approx(s0)
+        t1 = cutedsl_utils.tanh_approx(s1)
+        acc_S[i] = t0
+        acc_S[i + 1] = t1
+        dtanh[i] = 1.0 - t0 * t0
+        dtanh[i + 1] = 1.0 - t1 * t1

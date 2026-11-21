@@ -16,6 +16,7 @@
 and fake-tensor builders for bwd kernels."""
 import hashlib
 import inspect
+import math
 import os
 from dataclasses import dataclass, replace
 from functools import lru_cache
@@ -126,6 +127,21 @@ def materialize_mask_types(
     return torch.full((num_ranges,), mask_types, dtype=torch.int32, device=device)
 
 
+def normalize_softcap(softcap: float | None) -> float | None:
+    """``None`` / ``0`` disable softcap; an enabled cap must be finite and
+    positive.
+
+    The SM100/SM110 kernels store ``tanh(s * softmax_scale / softcap)`` and
+    fold ``softcap`` into the exp2 scale after masking, so a negative cap
+    would turn the mask's ``-inf`` into ``+inf``.
+    """
+    if softcap is None or softcap == 0.0:
+        return None
+    if not (math.isfinite(softcap) and softcap > 0.0):
+        raise ValueError(f"softcap must be 0 (off) or finite and > 0, got {softcap}")
+    return float(softcap)
+
+
 def validate_range_feature_support(
     *,
     major_arch: int,
@@ -135,8 +151,7 @@ def validate_range_feature_support(
     range_merge_unique_writer: bool,
     has_mask_mod: bool,
     has_block_sparse: bool,
-    has_score_mod: bool,
-    has_softcap: bool,
+    has_user_score_mod: bool,
     deterministic: bool = False,
     bwd_head_dim: int | None = None,
     sm_margin: int = 0,
@@ -150,6 +165,8 @@ def validate_range_feature_support(
     runtime-mask restrictions because merging produces per-row mask types.
     Merging also requires unique writers for O in forward or dK/dV in
     backward, as declared by ``range_merge_unique_writer``.
+    ``has_user_score_mod`` is a caller-provided score_mod; softcap is native
+    to the SM100/SM110 kernels and does not count.
 
     ``deterministic`` and ``bwd_head_dim`` apply only to backward. Q/k ranges
     do not support deterministic backward. RangeMerge does not support the
@@ -184,10 +201,10 @@ def validate_range_feature_support(
         raise NotImplementedError(f"{feature} cannot be combined with mask_mod")
     if has_block_sparse:
         raise NotImplementedError(f"{feature} cannot be combined with block sparsity")
-    if has_score_mod:
-        raise NotImplementedError(f"{feature} cannot be combined with score_mod")
-    if has_softcap:
-        raise NotImplementedError(f"{feature} cannot be combined with softcap")
+    if has_user_score_mod:
+        raise NotImplementedError(
+            f"{feature} cannot be combined with a user-provided score_mod"
+        )
     if range_merge and bwd_head_dim is not None and bwd_head_dim > 128:
         raise NotImplementedError("bwd RangeMerge is not supported at head_dim 192")
 
@@ -265,7 +282,6 @@ def select_bwd_gqa_fold(
     has_block_sparse: bool,
     has_mask_mod: bool,
     has_score_mod: bool,
-    has_softcap: bool,
     deterministic: bool,
     num_head: int,
     num_head_kv: int,
@@ -285,8 +301,7 @@ def select_bwd_gqa_fold(
             ``cat_gqa``.
         NotImplementedError: ``bwd_pack_factor`` > 1 outside the SM100/SM110
             q/k-range kernels, together with block sparsity, mask_mod,
-            score_mod, softcap or deterministic, or not dividing the Q rows per
-            CTA.
+            score_mod or deterministic, or not dividing the Q rows per CTA.
     """
     qhead_per_kvhead = num_head // num_head_kv
     if bwd_pack_factor < 1 or qhead_per_kvhead % bwd_pack_factor != 0:
@@ -320,7 +335,6 @@ def select_bwd_gqa_fold(
         ("block sparsity", has_block_sparse),
         ("mask_mod", has_mask_mod),
         ("score_mod", has_score_mod),
-        ("softcap", has_softcap),
         ("deterministic", deterministic),
     ):
         if requested:
@@ -925,36 +939,6 @@ def hash_callable(
         hasher.update(f"{attr}={val!r}".encode())
 
     return hasher.hexdigest()
-
-
-def create_softcap_scoremod(softcap_val):
-    @cute.jit
-    def scoremod_premask_fn(
-        acc_S_SSA, batch_idx, head_idx, q_idx, kv_idx, seqlen_info, aux_tensors
-    ):
-        scores = acc_S_SSA / softcap_val
-        return softcap_val * cute.math.tanh(scores, fastmath=True)
-
-    return scoremod_premask_fn
-
-
-def create_softcap_scoremod_bwd(softcap_val):
-    @cute.jit
-    def scoremod_bwd_fn(
-        grad_out_SSA,
-        score_SSA,
-        batch_idx,
-        head_idx,
-        q_idx,
-        kv_idx,
-        seqlen_info,
-        aux_tensors,
-    ):
-        scores = score_SSA / softcap_val
-        tanh_scores = cute.math.tanh(scores, fastmath=True)
-        return grad_out_SSA * (1.0 - tanh_scores * tanh_scores)
-
-    return scoremod_bwd_fn
 
 
 def convert_from_dlpack_leading_static(

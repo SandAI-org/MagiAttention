@@ -28,6 +28,8 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
 )
 from magi_attention.testing import parameterize
 from magi_attention.testing.cutedsl_utils import (
+    DSINK_ATOL,
+    DSINK_RTOL,
     GQA_HD128,
     MHA_HD128,
     SM100_FAMILY_REQUIRED,
@@ -36,6 +38,7 @@ from magi_attention.testing.cutedsl_utils import (
     HeadConfig,
     Ranges,
     assert_close_to_torch_ref,
+    dsink_reference,
     is_sm100_family,
     make_qkv,
     ranges_from_lengths,
@@ -106,28 +109,6 @@ FOLD_ATOL = FOLD_RTOL = 1e-5
 
 def make_sink(num_sinks: int, num_heads: int, device: int | str) -> torch.Tensor:
     return torch.randn(num_sinks, num_heads, device=device, requires_grad=True)
-
-
-def dsink_reference(
-    out: torch.Tensor, dout: torch.Tensor, lse: torch.Tensor, sink: torch.Tensor
-) -> torch.Tensor:
-    """fp64 ``dsink[s, h] = -sum_q sum_d(O * dO) * exp(sink[s, h] - LSE[q, h])``
-    over thd ``out``/``dout`` and ``[total_q, num_heads]`` ``lse``.
-
-    Rows with LSE = -inf have no keys and contribute nothing.
-    """
-    has_keys = lse != -math.inf
-    delta = (
-        out.double().masked_fill(~has_keys[..., None], 0)
-        * dout.double().masked_fill(~has_keys[..., None], 0)
-    ).sum(dim=-1)
-    probability = torch.exp(sink.double()[None] - lse.double()[:, None])
-    probability = probability.masked_fill(~has_keys[:, None], 0)
-    return -(delta[:, None] * probability).sum(dim=0).float()
-
-
-DSINK_ATOL = 2e-4
-DSINK_RTOL = 0.1
 
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)

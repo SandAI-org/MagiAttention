@@ -14,6 +14,7 @@
 
 import os
 from functools import partial
+from itertools import product
 
 import torch
 import torch.distributed as dist
@@ -44,6 +45,43 @@ from magi_attention.testing.utils import (
     switch_envvars,
     switch_kernel_backend_context,
 )
+
+FULL_ATTN_CASES = [
+    (*args, 0.0, None)
+    for args in product(
+        [(8, 8), (8, 4)],
+        [128, 64],
+        [
+            MagiAttentionKernelBackend.FFA,
+            MagiAttentionKernelBackend.SDPA,
+            MagiAttentionKernelBackend.CUTEDSL,
+        ],
+        [False, True],
+        [False, True],
+        [torch.float16, torch.bfloat16],
+    )
+] + [
+    (
+        (8, 4),
+        128,
+        MagiAttentionKernelBackend.CUTEDSL,
+        False,
+        False,
+        torch.bfloat16,
+        30.0,
+        0,
+    ),
+    (
+        (8, 4),
+        128,
+        MagiAttentionKernelBackend.CUTEDSL,
+        False,
+        False,
+        torch.bfloat16,
+        30.0,
+        4,
+    ),
+]
 
 
 class TestDistAttn(DistTestBase):
@@ -139,70 +177,10 @@ class TestDistAttn(DistTestBase):
     def device(self) -> int:
         return torch.cuda.current_device()
 
-    @skip_if_lt_x_gpu(4)
-    @with_comms
-    @parameterize("num_heads", [(8, 8), (8, 4)])
-    @parameterize("head_dim", [128, 64])
-    @parameterize(
-        "backend",
-        [
-            MagiAttentionKernelBackend.FFA,
-            MagiAttentionKernelBackend.SDPA,
-            MagiAttentionKernelBackend.CUTEDSL,
-        ],
-    )
-    @parameterize("use_hier_comm", [False, True])
-    @parameterize("use_native_grpcoll", [False, True])
-    @parameterize("dtype", [torch.float16, torch.bfloat16])
-    def test_full_attn(
-        self,
-        num_heads: tuple[int, int],
-        head_dim: int,
-        backend: MagiAttentionKernelBackend,
-        use_hier_comm: bool,
-        use_native_grpcoll: bool,
-        dtype: torch.dtype,
-    ):
-        # FFA is SM90 only; the CUTEDSL range kernels with per-range mask types
-        # are SM100/SM110 only. Return rather than skipTest: a SkipTest inside
-        # one combination aborts every remaining combination of this method.
-        major, minor = torch.cuda.get_device_capability()
-        if backend == MagiAttentionKernelBackend.FFA and (major, minor) != (9, 0):
-            return
-        if backend == MagiAttentionKernelBackend.CUTEDSL and major not in (10, 11):
-            return
-
-        flag_comb = next(self.flag_iterator)
-        seqlen_sink = flag_comb["seqlen_sink"]
-        return_max_logits = flag_comb["return_max_logits"]
-        use_native_grpcoll &= self.native_grpcoll_registered
-
-        is_sdpa_backend = backend == MagiAttentionKernelBackend.SDPA
-
-        # skip when enabling hier comm
-        if use_hier_comm:
-            # TODO: support hier comm with native grpcoll
-            if use_native_grpcoll:
-                return
-
-        # switch the env flags
-        switch_back = switch_envvars(
-            envvar_name_list=[
-                self.kernel_backend_envvar,
-                self.hier_comm_envvar,
-                self.native_grpcoll_envvar,
-            ],
-            enable_dict={
-                self.kernel_backend_envvar: True,
-                self.hier_comm_envvar: use_hier_comm,
-                self.native_grpcoll_envvar: use_native_grpcoll,
-            },
-            enable_value_dict={self.kernel_backend_envvar: backend.value},
-        )
-
-        # prepare meta and runtime
-        # TODO: add more attn masks for dist attn
-        nhq, nhk = num_heads
+    def _full_attn_runtime(
+        self, nhq: int, nhk: int, head_dim: int, use_hier_comm: bool
+    ) -> DistAttnRuntime:
+        """Use 128 local KV tokens and fetch the other three ranks' KV in one stage."""
         calc_meta = CalcMeta(
             local_attn_arg=AttnArg(
                 q_ranges=AttnRanges.from_ranges([[0, 128]]),
@@ -253,11 +231,71 @@ class TestDistAttn(DistTestBase):
             cp_group_gc=self.nccl_groups[0],
             cp_group_gr=self.nccl_groups[1],
         )
+        return dist_attn_runtime
+
+    @skip_if_lt_x_gpu(4)
+    @with_comms
+    @parameterize("case", FULL_ATTN_CASES)
+    def test_full_attn(self, case):
+        (
+            (nhq, nhk),
+            head_dim,
+            backend,
+            use_hier_comm,
+            use_native_grpcoll,
+            dtype,
+            softcap,
+            seqlen_sink,
+        ) = case
+        # FFA is SM90 only; the CUTEDSL range kernels with per-range mask types
+        # are SM100/SM110 only. Return rather than skipTest: a SkipTest inside
+        # one combination aborts every remaining combination of this method.
+        major, minor = torch.cuda.get_device_capability()
+        if backend == MagiAttentionKernelBackend.FFA and (major, minor) != (9, 0):
+            return
+        if backend == MagiAttentionKernelBackend.CUTEDSL and major not in (10, 11):
+            return
+
+        if seqlen_sink is None:
+            flag_comb = next(self.flag_iterator)
+            seqlen_sink = flag_comb["seqlen_sink"]
+            return_max_logits = flag_comb["return_max_logits"]
+        else:
+            return_max_logits = False
+        use_native_grpcoll &= self.native_grpcoll_registered
+
+        is_sdpa_backend = backend == MagiAttentionKernelBackend.SDPA
+
+        # skip when enabling hier comm
+        if use_hier_comm:
+            # TODO: support hier comm with native grpcoll
+            if use_native_grpcoll:
+                return
+
+        # switch the env flags
+        switch_back = switch_envvars(
+            envvar_name_list=[
+                self.kernel_backend_envvar,
+                self.hier_comm_envvar,
+                self.native_grpcoll_envvar,
+            ],
+            enable_dict={
+                self.kernel_backend_envvar: True,
+                self.hier_comm_envvar: use_hier_comm,
+                self.native_grpcoll_envvar: use_native_grpcoll,
+            },
+            enable_value_dict={self.kernel_backend_envvar: backend.value},
+        )
+
+        # prepare meta and runtime
+        dist_attn_runtime = self._full_attn_runtime(nhq, nhk, head_dim, use_hier_comm)
 
         # prepare data
-        local_q = torch.randn(
-            128, nhq, head_dim, device=self.device, dtype=dtype, requires_grad=True
-        )
+        local_q = torch.randn(128, nhq, head_dim, device=self.device, dtype=dtype)
+        if softcap > 0.0:
+            # Increase the logit magnitude so the cap has a measurable effect.
+            local_q.mul_(4.0)
+        local_q.requires_grad_()
         local_k = torch.randn(
             128, nhk, head_dim, device=self.device, dtype=dtype, requires_grad=True
         )
@@ -284,6 +322,7 @@ class TestDistAttn(DistTestBase):
             v=local_v,
             dist_attn_runtime=dist_attn_runtime,
             sink=total_sink,
+            softcap=softcap,
             return_max_logits=return_max_logits,
         )
         local_lse = meta.lse
@@ -319,9 +358,10 @@ class TestDistAttn(DistTestBase):
             v=total_v,
             mask=total_mask,
             sink=total_sink,
+            softcap=softcap,
             layout="thd",
             sink_layout="sh",
-            backend="torch" if total_sink is not None else "sdpa",
+            backend="torch" if softcap > 0.0 or total_sink is not None else "sdpa",
             high_precision=True,
             return_lse=True,
             return_max_logits=return_max_logits,
