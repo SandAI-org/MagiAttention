@@ -358,6 +358,16 @@ msgstr "方法论"
 msgid "Flex-Flash-Attention"
 msgstr "Flex-Flash-Attention"
 
+#: ../../source/blog/magi_attn.md:81
+msgid ""
+"See the separate [blog post](./native_ffa.md) for a deep dive into the "
+"native `FFA` kernel, including its slice-level scheduling and cross-slice "
+"reduction, the Hopper (SM90) and Blackwell (SM100) implementations and "
+"their differences, and the features built on top of it."
+msgstr ""
+"关于原生 `FFA` kernel 的深入介绍，包括 slice 级调度与跨 slice 归约、Hopper（SM90）与 Blackwell（SM100）"
+"两套实现及其差异，以及基于它构建的各项特性，请参见单独的 [博客](./native_ffa.md)。"
+
 #: ../../source/blog/magi_attn.md:82
 msgid "AttnSlice Representation"
 msgstr "AttnSlice 表示"

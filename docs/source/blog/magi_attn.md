@@ -78,6 +78,8 @@ Recent efforts like `DCP` {cite}`wang2024datacentricheterogeneityadaptivesequenc
 
 ### Flex-Flash-Attention
 
+See the separate [blog post](./native_ffa.md) for a deep dive into the native `FFA` kernel, including its slice-level scheduling and cross-slice reduction, the Hopper (SM90) and Blackwell (SM100) implementations and their differences, and the features built on top of it.
+
 #### AttnSlice Representation
 
 `Flash-Attention` {cite}`dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention,dao2025flashattention_cute` delivers high throughput, memory efficiency, and native support for varlen-packed inputs, making it a cornerstone for large-scale training. However, its kernels assume regular mask structure and do not handle irregular, rank-distributed masks efficiently—causing fragmentation, load imbalance, excess padding, and higher communication—so a mask‑flexible kernel that preserves Flash‑Attention’s performance is required {cite}`pytorch_sdpa,dong2024flexattentionprogrammingmodel,wang2025flashmaskefficientrichmask`.
