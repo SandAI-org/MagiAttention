@@ -196,16 +196,18 @@ class DynamicState(ParamsBase):
         """Store ``unit`` into every CTA's current response slot and signal
         its full mbarrier (see the class docstring)."""
         slot_ptr = self._response_ptr + self._producer_state.index
-        if const_expr(isinstance(self._pipeline, PipelineAsync)):
-            assert cluster_size == 1
-            with cute.arch.elect_one():
-                cute.make_tensor(slot_ptr, cute.make_layout(1))[0] = unit
-                self._pipeline.producer_commit(self._producer_state)
-        else:
+        # Test the multi-CTA type: CUTLASS DSL 4.8 derives PipelineClcFetchAsync
+        # from PipelineAsync, so an isinstance check on PipelineAsync matches both.
+        if const_expr(isinstance(self._pipeline, PipelineClcFetchAsync)):
             full_mbar_ptr = self._pipeline.producer_get_barrier(self._producer_state)
             with cute.arch.elect_one():
                 for cta_rank in range(cluster_size):
                     store_shared_remote(unit, slot_ptr, full_mbar_ptr, Int32(cta_rank))
+        else:
+            assert cluster_size == 1
+            with cute.arch.elect_one():
+                cute.make_tensor(slot_ptr, cute.make_layout(1))[0] = unit
+                self._pipeline.producer_commit(self._producer_state)
 
     def producer_advance(self, *, loc=None, ip=None):
         self._producer_state.advance(loc=loc, ip=ip)
@@ -214,7 +216,7 @@ class DynamicState(ParamsBase):
         """Read the current slot; call between consumer_wait and consumer_release."""
         slot_ptr = self._response_ptr + self._consumer_state.index
         unit = Int32(cute.make_tensor(slot_ptr, cute.make_layout(1))[0])
-        if const_expr(not isinstance(self._pipeline, PipelineAsync)):
+        if const_expr(isinstance(self._pipeline, PipelineClcFetchAsync)):
             # Order this generic-proxy read before the next st.async into the
             # slot; the 1-CTA publish is a generic store, ordered by the
             # release / acquire of the empty mbarrier.
