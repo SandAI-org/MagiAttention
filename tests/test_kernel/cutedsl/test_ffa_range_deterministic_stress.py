@@ -531,7 +531,7 @@ class TestWatchdogParent(TestCase):
 
 
 @pytest.mark.slow
-class TestFfaRangeDeterministicStress(TestCase):
+class TestFFARangeDeterministicStress(TestCase):
     def test_delayed_protocol_steps_complete_and_stay_bitwise(self):
         import torch
 

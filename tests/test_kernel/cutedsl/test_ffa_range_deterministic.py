@@ -316,7 +316,7 @@ def _range_args(relations: Relations, device="cuda") -> dict:
     )
 
 
-class TestFfaRangeDeterministicHost(TestCase):
+class TestFFARangeDeterministicHost(TestCase):
     """Host validation; builds no attention kernel."""
 
     def test_validate_accepts_head_dims_64_and_128(self):
@@ -535,7 +535,7 @@ class TestFfaRangeDeterministicHost(TestCase):
                     flex_flash_attn_func(q, k, v, **args, deterministic=True)
 
 
-class TestFfaRangeDeterministicFwd(TestCase):
+class TestFFARangeDeterministicFwd(TestCase):
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("deterministic q/k ranges require SM100/SM110")
@@ -1291,7 +1291,7 @@ def _assert_merged_dq_chain_settled(
         _assert_chain_want_settled(dkv_chain[0], dkv_want)
 
 
-class TestFfaRangeDeterministicBwd(TestCase):
+class TestFFARangeDeterministicBwd(TestCase):
     """dQ of every (relation, cluster K tile) is chained per Q row block, and
     reduced dK/dV of every (relation, q head) per K row block."""
 
@@ -2232,7 +2232,7 @@ class TestFfaRangeDeterministicBwd(TestCase):
         self._log_ran(f"bwd range merge 2-CTA overlap-gated handoff {cat_gqa=}")
 
 
-class TestFfaRangePersistentGrid(TestCase):
+class TestFFARangePersistentGrid(TestCase):
     """A persistent q/k-range launch (``sm_margin > 0`` or deterministic)
     caps its grid at ``num_sm - sm_margin`` CTAs in whole clusters. The host
     rejects a budget below one cluster before a kernel is built, whatever
@@ -2400,7 +2400,7 @@ class _ScanConflictsLauncher:
         )
 
 
-class TestFfaRangeChainScan(TestCase):
+class TestFFARangeChainScan(TestCase):
     """The conflict scan records, per block, the last range with a row there,
     also when consecutive ranges share a block through different lanes and
     the stores of one range are delayed past those of the next."""
@@ -2488,7 +2488,7 @@ _BWD_UNIT_RELATIONS: dict[int, Relations] = {
 }
 
 
-class TestFfaRangeDeterministicClaims(TestCase):
+class TestFFARangeDeterministicClaims(TestCase):
     """Every valid DYNAMIC unit is claimed once and consumed by every warp of
     every CTA of one cluster, for unit counts around the cluster count, and
     the deterministic launch replays under CUDA Graphs."""
