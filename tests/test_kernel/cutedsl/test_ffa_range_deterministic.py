@@ -1203,7 +1203,7 @@ def _merged_k_relations_2cta_adjacent(
 def _merged_k_groups(relations: Relations) -> list[tuple[list[int], list[list[int]]]]:
     """(K range, Q ranges of its pairs) per merged K group, in the launch
     order of the K-merge plan the kernel receives; its order is checked
-    against a reference in ``tests/test_attn/test_merge_range.py``."""
+    against a reference in ``tests/test_kernel/cutedsl/test_range_merge.py``."""
     args = _range_args(relations)
     plan = plan_range_merge_bwd(args["q_ranges"], args["k_ranges"], args["mask_types"])
     cu = plan.cu_batches.tolist()
