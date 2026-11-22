@@ -119,18 +119,10 @@ class ClcState(ParamsBase):
 class DynamicState(ParamsBase):
     """Runtime state of the DYNAMIC persistent schedule.
 
-    Each cluster starts with its grid-assigned tile, or with a claimed one
-    under ``claim_first_tile``. Its leader's scheduler warp claims the other
-    tiles from a global counter and publishes a 4-byte index to every CTA.
-    All warps consume each index before the slot is reused.
-
-    The publish depends on the cluster size. A multi-CTA cluster writes
-    every CTA's slot with ``st.async.shared::cluster``, whose 4-byte
-    complete-tx completes the slot's full transaction mbarrier. That
-    instruction is undefined for a cluster of one CTA (PTX ISA), so a 1-CTA
-    cluster uses a plain ``PipelineAsync``: an ``st.shared`` of the index,
-    then the producer's release arrive on the full mbarrier, which the
-    consumers' acquire wait pairs with.
+    Each cluster starts with its grid-assigned or claimed tile. Its leader's scheduler
+    warp claims subsequent tiles from a global counter and publishes a 4-byte
+    index to every CTA. All warps consume each index before the slot is reused.
+    1-CTA clusters use ``PipelineAsync`` since ``st.async.shared::cluster`` is undefined for 1 CTA (PTX ISA).
     """
 
     _pipeline: PipelineClcFetchAsync | PipelineAsync
@@ -148,9 +140,6 @@ class DynamicState(ParamsBase):
         cta_layout_vmnk: cute.Layout,
         response_ptr: cute.Pointer,
     ) -> "DynamicState":
-        """Build the slot pipeline, ``2 * num_stages`` mbarriers at
-        ``barrier_storage``, for one producer thread (the leader's scheduler
-        warp) and ``num_consumer_threads`` consumer threads over the cluster."""
         producer_group = cutedsl_utils.ThreadCooperativeGroup(1)
         consumer_group = cutedsl_utils.ThreadCooperativeGroup(num_consumer_threads)
         if const_expr(cute.size(cta_layout_vmnk) == 1):
@@ -187,14 +176,9 @@ class DynamicState(ParamsBase):
         )
 
     def producer_acquire(self, *, loc=None, ip=None):
-        """Wait until every consumer released the slot; a multi-CTA cluster
-        also arms the slot's full mbarrier on every CTA for the 4-byte
-        publish."""
         self._pipeline.producer_acquire(self._producer_state, loc=loc, ip=ip)
 
     def publish(self, unit: Int32, cluster_size: int):
-        """Store ``unit`` into every CTA's current response slot and signal
-        its full mbarrier (see the class docstring)."""
         slot_ptr = self._response_ptr + self._producer_state.index
         # Test the multi-CTA type: CUTLASS DSL 4.8 derives PipelineClcFetchAsync
         # from PipelineAsync, so an isinstance check on PipelineAsync matches both.
@@ -217,9 +201,7 @@ class DynamicState(ParamsBase):
         slot_ptr = self._response_ptr + self._consumer_state.index
         unit = Int32(cute.make_tensor(slot_ptr, cute.make_layout(1))[0])
         if const_expr(isinstance(self._pipeline, PipelineClcFetchAsync)):
-            # Order this generic-proxy read before the next st.async into the
-            # slot; the 1-CTA publish is a generic store, ordered by the
-            # release / acquire of the empty mbarrier.
+            # Order generic-proxy read before next st.async; 1-CTA uses generic st.shared.
             cute.arch.fence_proxy("async.shared", space="cta")
         return unit
 
@@ -260,9 +242,7 @@ class TileSchedulerProtocol(Protocol):
 
     One scheduler object is shared by every warp-role region of a kernel, so
     ``initial_work_tile_info`` must derive the first tile from the CTA's own
-    coordinates, or from the first published slot under DYNAMIC
-    ``claim_first_tile``, and never read state that another role's walk
-    advanced.
+    coordinates (or slot 0 under ``claim_first_tile``) and never read state that another role's walk advanced.
     """
 
     def get_current_work(self) -> WorkTileInfo:
@@ -315,7 +295,6 @@ class TileSchedulerArguments(ParamsBase):
     mCuSeqlensQ: Optional[cute.Tensor] = None
     mSeqUsedQ: Optional[cute.Tensor] = None
     mQRanges: Optional[cute.Tensor] = None
-    # Optional [1] int32 active batch count on device (e.g. RangeMerge unique_count).
     mNumBatches: Optional[cute.Tensor] = None
     max_outer_range_width: Optional[Int32] = None
     qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
@@ -329,12 +308,8 @@ class TileSchedulerArguments(ParamsBase):
     use_cluster_idx: cutlass.Constexpr[bool] = False
     # DYNAMIC schedule only: [1] int32 tile counter, zero before the launch.
     mTileCounter: Optional[cute.Tensor] = None
-    # DYNAMIC schedule only: every cluster also claims its first tile from
-    # mTileCounter, so the t-th claim is cluster unit t. A unit is then only
-    # held once every smaller unit is held by a running cluster, which the
-    # deterministic range-lock chain needs: a tile waits on smaller units
-    # only. With False, units below the grid's cluster count go to the
-    # clusters by index, and a cluster that has not started yet holds one.
+    # DYNAMIC only: claim every tile from mTileCounter, so a unit is claimed only
+    # after all smaller units (chain progress).
     claim_first_tile: cutlass.Constexpr[bool] = False
 
 
@@ -1154,9 +1129,6 @@ class SingleTileVarlenScheduler:
         assert (params.scheduling_mode == SchedulingMode.DYNAMIC) == (
             dynamic is not None
         ), "the DYNAMIC schedule and its DynamicState come together"
-        # The first tile comes from the CTA's grid coordinates; under
-        # claim_first_tile, initial_work_tile_info replaces it with the
-        # first published claim.
         tile_idx, split_idx, _ = cute.arch.block_idx()
         return SingleTileVarlenScheduler(
             params, tile_idx, split_idx, dynamic=dynamic, loc=loc, ip=ip
@@ -1464,12 +1436,6 @@ class SingleTileVarlenScheduler:
 
     @cute.jit
     def _claim_unit(self) -> Int32:
-        """Claim the next cluster-unit tile index (DYNAMIC; whole scheduler warp).
-
-        Without claim_first_tile, units below the grid's cluster count are the
-        clusters' first tiles (their own cluster indices), so claimed units
-        start right after them. With it, the claim is the unit itself.
-        """
         params = self.params
         assert params.mTileCounter is not None
         claimed = Int32(0)
@@ -1486,9 +1452,6 @@ class SingleTileVarlenScheduler:
         return claimed + cute.arch.grid_dim()[0] // params.cluster_shape_m
 
     def _consume_published_unit(self, *, loc=None, ip=None) -> WorkTileInfo:
-        """Read the unit in the current response slot, advance the consumer
-        cursor to the next slot, and map the unit (DYNAMIC).
-        """
         assert self.dynamic is not None  # mypy
         self.dynamic.consumer_wait(loc=loc, ip=ip)
         unit = self.dynamic.read_published()
@@ -1531,21 +1494,12 @@ class SingleTileVarlenScheduler:
 
     def _claim_and_publish(self, *, loc=None, ip=None):
         assert self.dynamic is not None  # mypy
-        # Acquiring the slot before claiming keeps a cluster at most one
-        # claimed tile ahead of the tile its slowest warp is processing.
+        # Acquire slot before claiming so a cluster stays at most one claimed tile ahead of its slowest warp.
         self.dynamic.producer_acquire(loc=loc, ip=ip)
         self.dynamic.publish(self._claim_unit(), self.params.cluster_shape_m)
         self.dynamic.producer_advance(loc=loc, ip=ip)
 
     def claim_first_work(self, *, loc=None, ip=None):
-        """Initialize the producer cursor and, under ``claim_first_tile``,
-        claim and publish the first cluster unit.
-
-        Called once by the leader's scheduler warp before its own
-        ``initial_work_tile_info``. Both producer and consumer cursors use role-
-        local ``PipelineState`` instances and always point to the next slot to
-        fill or read.
-        """
         if const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
             assert self.dynamic is not None  # mypy
             self.dynamic.reset_producer(loc=loc, ip=ip)

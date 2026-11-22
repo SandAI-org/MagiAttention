@@ -1880,23 +1880,11 @@ def gmem_store_cs_i32(
     cute.arch.store(ptr.llvm_ptr, val, cop="cs", loc=loc, ip=ip)
 
 
-# ---------------------------------------------------------------------------
-# Cluster mbarrier helpers with cluster-scope memory ordering
-# ---------------------------------------------------------------------------
-
-
 @dsl_user_op
 def mbarrier_arrive_peer_release_cluster(
     mbar_ptr: cute.Pointer, peer_cta_rank_in_cluster: Int32, *, loc=None, ip=None
 ) -> None:
-    """Arrive once on the mbarrier at ``mbar_ptr``'s offset in the shared
-    memory of cluster CTA ``peer_cta_rank_in_cluster``, with release
-    semantics at cluster scope.
-
-    ``cute.arch.mbarrier_arrive(..., peer_cta_rank_in_cluster=...)`` emits
-    ``mbarrier.arrive.release.cta.shared::cluster``: its release is at CTA
-    scope, which does not synchronize with a waiter in another CTA, so it
-    orders no memory access of the arriving CTA before the peer's wait."""
+    """Cluster-scope peer arrive; cute.arch.mbarrier_arrive emits CTA-scope release only."""
     llvm.inline_asm(
         None,
         [
@@ -1917,10 +1905,7 @@ def mbarrier_arrive_peer_release_cluster(
 def mbarrier_wait_acquire_cluster(
     mbar_ptr: cute.Pointer, phase: Int32, *, loc=None, ip=None
 ) -> None:
-    """Spin until the phase of parity ``phase`` of the CTA-local mbarrier at
-    ``mbar_ptr`` completes, with acquire semantics at cluster scope, so the
-    accesses a peer CTA released with its arrival are visible after it.
-    ``cute.arch.mbarrier_wait`` acquires at CTA scope only."""
+    """Cluster-scope parity wait; cute.arch.mbarrier_wait emits CTA-scope acquire only."""
     llvm.inline_asm(
         None,
         [

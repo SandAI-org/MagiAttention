@@ -90,19 +90,13 @@ def _apply_range_merge(
     inner_ranges: torch.Tensor,
     mask_types: int | torch.Tensor,
 ) -> RangeMergePlan:
-    """The merged (group, pair) CSR form of one pass's relation rows.
+    """Rewrite one pass's relation rows to merged (group, pair) CSR form.
 
     Forward merges on the Q axis, backward on the K axis; the caller picks
-    which tensor is outer. The plan holds ``[M, 2]`` outer group slots (with
-    ``G == unique_count[0]`` active groups when ``unique_count`` is set, else
-    ``M == G``), ``[R, 2]`` inner rows and ``[R]`` mask types for the caller's
-    ``R`` relations (materialized per row, since the merge reorders rows), and
-    the ``[M + 1]`` CSR between them.
+    which tensor is outer.
     """
     if isinstance(range_merge, RangeMergePlan):
         plan = range_merge
-        # Shapes only: cu_batches[G] == R holds by construction, and reading
-        # it back would synchronize the device.
         assert (
             plan.sorted_inner_ranges.shape[0]
             == plan.sorted_mask_types.shape[0]
@@ -201,9 +195,7 @@ def _flex_flash_attn_fwd(
         sink: optional ``[n_sink, num_head]`` sink logits (``"sh"`` layout only).
         pack_gqa: fold the q heads of one kv head into the M dimension, so one
             CTA serves ``(token, q_head)`` rows of a kv head. ``None`` enables
-            it for GQA on the direct-store paths when
-            ``tile_m % (num_head // num_head_kv) == 0``; on the range
-            atomic-merge path it is opt-in and requires that multiple.
+            it for GQA when ``tile_m % (num_head // num_head_kv) == 0`` (opt-in on range atomic-merge).
             SM80 and ``range_merge`` always run unpacked, including with
             ``pack_gqa=True``.
         out_dtype: GMEM O dtype, one of fp32/fp16/bf16. ``None`` takes the dtype
@@ -212,9 +204,7 @@ def _flex_flash_attn_fwd(
             accept only the input dtype.
         sm_margin: number of SMs to reserve for concurrent kernels such as communication.
             Currently supported for q/k ranges on SM100/SM110; the forward
-            with head_dim 192 ignores it. ``num_sm - sm_margin`` must hold
-            one cluster of the launched kernel (two SMs for a 2-CTA kernel),
-            otherwise ``ValueError`` is raised.
+            with head_dim 192 ignores it.
         max_logits: optional fp32 ``[num_head]`` buffer that the per-q-head
             maximum softmax logit (``softmax_scale * q.k``, after softcap,
             sinks excluded) over every attended (q, k) pair is merged into with
@@ -228,17 +218,6 @@ def _flex_flash_attn_fwd(
             after merging. The fill costs one postprocess launch, plus an LSE
             ``-inf`` fill when ``lse`` is allocated here without a sink.
             ``out`` needs no initialization.
-        deterministic: merge the O/LSE partials of overlapping q ranges in
-            relation order on the range atomic path, so O and LSE are bitwise
-            identical across runs and independent of ``sm_margin``. The launch
-            is persistent whatever ``sm_margin``; ``head_dim == head_dim_v``
-            in {64, 128} only. Under ``pack_gqa`` each (token, q head) row
-            also merges in relation order. The range atomic path
-            exists on SM100/SM110 only; q/k ranges without
-            ``disable_fwd_atomic_reduction`` raise ``NotImplementedError`` on
-            other architectures. The dense and
-            direct-store paths, RangeMerge included, have one writer per O row
-            that sums its K tiles in a fixed order, and are unaffected.
 
     Returns:
         A tuple of (output, lse) where:
@@ -356,11 +335,6 @@ def _flex_flash_attn_fwd(
         softmax_scale = 1.0 / math.sqrt(head_dim)
     qhead_per_kvhead = num_head // num_head_kv
 
-    # Only the SM100/SM110 range atomic path orders the O/LSE merge of
-    # overlapping q ranges. Other arches direct-store q/k ranges, which gives
-    # one writer per O row only under the caller's disable_fwd_atomic_reduction
-    # declaration, so deterministic without it is rejected rather than run
-    # unordered. This check reads the caller's value, before it is forced below.
     if (
         deterministic
         and has_ranges
@@ -369,10 +343,9 @@ def _flex_flash_attn_fwd(
     ):
         raise NotImplementedError("deterministic q/k ranges require SM100/SM110")
     # The atomic merge is a ranges-overlap path; a no-op for dense, and
-    # unsupported outside SM100/SM110, which take the direct store.
+    # unsupported outside SM100/SM110 — fall back to the direct store there.
     if not has_ranges or major_arch not in (10, 11):
         disable_fwd_atomic_reduction = True
-    # Only the range atomic merge has several writers per O row to order.
     fwd_deterministic = deterministic and not disable_fwd_atomic_reduction
     if fwd_deterministic:
         if block_sparse_tensors is not None:
@@ -517,10 +490,6 @@ def _flex_flash_attn_fwd(
             intra_wg_overlap = fwd_cfg.intra_wg_overlap
 
     if pack_gqa is None:
-        # The direct-store paths pack GQA only when every q tile starts on a
-        # token boundary: a tile_m not divisible by the group makes the
-        # kernel load Q and store O without TMA, which is slower than the
-        # unpacked kernel. The packed atomic merge stays opt-in.
         pack_gqa = (
             qhead_per_kvhead > 1
             and disable_fwd_atomic_reduction
@@ -539,10 +508,6 @@ def _flex_flash_attn_fwd(
             max_seqlen_q >= _q_max
         ), f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
     if fwd_deterministic:
-        # Atomic ranges launch 1-CTA clusters, one tile per at least tile_m
-        # rows of one range and head: q rows of a q head, or packed rows
-        # (G per token) of a kv head under PackGQA. Ranges may overlap, so the
-        # ticket count is bounded per range by the longest one.
         tile_heads = num_head_kv if pack_gqa else num_head
         tile_rows = max_seqlen_q * (qhead_per_kvhead if pack_gqa else 1)
         validate_range_deterministic(
@@ -624,9 +589,7 @@ def _flex_flash_attn_fwd(
     is_varlen_mha = has_ranges and qhead_per_kvhead == 1
     is_dense_noncausal = not has_ranges and not causal and not local
 
-    # K/V borrowing uses persistent execution even without an SM reservation,
-    # and so does the deterministic chain, whose progress needs every tile
-    # claimed in ticket order (DYNAMIC).
+    # K/V borrowing uses persistent execution even without an SM reservation.
     ranges_persistent = has_ranges and (
         sm_margin > 0 or fwd_fp32_o_borrow_kv or fwd_deterministic
     )
@@ -679,8 +642,6 @@ def _flex_flash_attn_fwd(
     if not disable_fwd_atomic_reduction:
         # One int32 lock per (tile_m rows, head) of the layout the kernel
         # tiles (packed rows and kv heads under pack_gqa); +1 guard tile.
-        # The deterministic chain keeps (published writer, arrival count) per
-        # lock instead, see range_chain.
         lock_rows = total_q * (qhead_per_kvhead if pack_gqa else 1)
         num_lock_blocks = (lock_rows + tile_m - 1) // tile_m + 1
         range_locks = torch.zeros(
@@ -691,8 +652,6 @@ def _flex_flash_attn_fwd(
             device=device,
         )
         if fwd_deterministic:
-            # One row per execution slot; the 1-CTA persistent grid has at
-            # most num_sm - sm_margin CTAs.
             num_slots = (
                 torch.cuda.get_device_properties(device).multi_processor_count
                 - sm_margin
@@ -1066,18 +1025,6 @@ def _flex_flash_attn_bwd(
             the dK/dV hole-zeroing sweep and bounds the scheduler by
             ``total_k`` (``sum(len) <= total_k``). Overlapping k ranges must
             not set this.
-        deterministic: on q/k ranges, merge the dQ partials of every
-            (relation, K tile) into dQ in that order, and the reduced dK/dV
-            partials of every (relation, q head) in that order (one writer per
-            relation under ``cat_gqa`` or MHA), so the gradients are bitwise
-            identical across runs and independent of ``sm_margin``. The
-            launch is persistent whatever ``sm_margin``. SM100/SM110,
-            ``head_dim == head_dim_v`` in {64, 128} only, without block
-            sparsity. Under RangeMerge the dQ writers are the (merged K group,
-            K tile) units, each adding its pairs in pair order (on 2-CTA
-            clusters the two CTAs hand off at every pair boundary); the
-            merged dK/dV are stored once. Dense inputs keep the
-            semaphore-ordered dense path.
 
     Returns:
         A tuple of (dQ, dK, dV, dsink): the gradients with the shapes of q, k, v
@@ -1129,10 +1076,6 @@ def _flex_flash_attn_bwd(
         and k_ranges is not None
         and k_ranges.shape[0] > 0
     ):
-        # max_seqlen_k must bound every K range: the quota scheduler takes it
-        # as the widest range, and deterministic ranges number the dQ writers
-        # by it, which collide on a longer range (out-of-order merge or hang).
-        # Reading the ranges back syncs, so only debug mode checks it.
         longest_k = int((k_ranges[:, 1] - k_ranges[:, 0]).max().item())
         if longest_k > max_seqlen_k:
             raise ValueError(
@@ -1387,22 +1330,11 @@ def _flex_flash_attn_bwd(
     direct_dq_init = (
         disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
     )
-    # Without the in-kernel K-merge the kernels see the caller's sorted, disjoint
-    # q_ranges; the K-merge repeats a q range once per K group.
     q_ranges_disjoint = direct_dq_init and not range_merge_active
-    # Packed tiles reduce dQ through the token-space row-major dQacc, whose
-    # TMA box splits rows into (pack_factor, tokens). Disjoint q_ranges isolate
-    # each range into tile_m-aligned dQacc slots; deterministic launches order
-    # K-tile additions within each slot on per-slot semaphores.
     use_dense_dqacc_for_ranges = (
         q_ranges_disjoint and head_dim % 32 == 0 and gqa_fold.pack_factor == 1
     )
 
-    # On q/k ranges with overlapping Q, dQ rows of every relation (merged K
-    # group under RangeMerge) and K tile are merged in that order by the dQ
-    # range chain; disjoint Q ranges with dense dQacc slots order each Q tile's
-    # active K tiles on per-slot semaphores. Reduced dK/dV rows are merged in
-    # (relation, q head) order by the dK/dV range chain.
     range_deterministic = deterministic and has_ranges
     dq_writer_stride: int | None = None
     if range_deterministic:
@@ -1414,11 +1346,6 @@ def _flex_flash_attn_bwd(
             )
         dkv_writer_stride = 1 if cat_gqa else qhead_per_kvhead
         cluster_tile_k = n_block_size * cluster_size
-        # Writer numbers r * dq_writer_stride + n + 1 of the dQ chain, with
-        # n below the cluster K tiles of max_seqlen_k; unique under the
-        # max_seqlen_k contract (no K range is longer), which is trusted and
-        # checked only in FFA debug mode. Disjoint Q with dense dQacc uses
-        # per-slot semaphores and needs no dQ writer stride.
         max_k_tiles = (seqlen_k + cluster_tile_k - 1) // cluster_tile_k
         if not use_dense_dqacc_for_ranges:
             dq_writer_stride = max_k_tiles
@@ -1430,16 +1357,11 @@ def _flex_flash_attn_bwd(
             head_dim_v=head_dim_v,
             num_sm=num_sm,
             cluster_size=cluster_size,
-            # A cluster unit is one cluster K tile of one range and scheduler
-            # head; ranges may overlap, so bound each by the longest one.
             max_tickets=batch_size
             * max_k_tiles
             * (num_head_kv if cat_gqa else num_head),
-            # The last writers: r * stride + j + 1 with r < R and j < stride.
             max_writer=max(dq_max_writer, dkv_max_writer),
         )
-    # Deterministic q/k-range launches need the DYNAMIC schedule's ticket order
-    # even without an SM reservation.
     bwd_persistent = sm_margin > 0 or range_deterministic
     if bwd_persistent:
         validate_persistent_grid(
@@ -1543,8 +1465,6 @@ def _flex_flash_attn_bwd(
         return dq, dk, dv, dsink
 
     if direct_dkv and not declared_k_full_coverage:
-        # The sweep binary-searches range starts; merged K groups are listed
-        # in launch order, so it reads the plan's start-ordered copy.
         hole_k_ranges = (
             k_ranges if k_merge is None else k_merge.merged_outer_ranges_by_start
         )
@@ -1697,9 +1617,6 @@ def _flex_flash_attn_bwd(
         dQ_semaphore = None
     dq_chain_state = dq_conflict = None
     if range_deterministic and not use_dense_dqacc_for_ranges:
-        # See range_chain: (published writer, arrival count) per (Q block,
-        # q head), +1 guard block, and one conflict-state row per CTA of the
-        # persistent grid, which has at most num_sm - sm_margin CTAs.
         num_q_blocks = (total_q + m_block_size - 1) // m_block_size + 1
         dq_chain_state = torch.zeros(
             num_q_blocks, num_head, 2, dtype=torch.int32, device=device
@@ -1709,7 +1626,6 @@ def _flex_flash_attn_bwd(
         )
     dkv_chain_state = dkv_conflict = None
     if range_deterministic and not direct_dkv:
-        # The same per (K block of one cluster K tile, kv head).
         num_k_blocks = (total_k + cluster_tile_k - 1) // cluster_tile_k + 1
         dkv_chain_state = torch.zeros(
             num_k_blocks, num_head_kv, 2, dtype=torch.int32, device=device
@@ -2456,10 +2372,7 @@ def flex_flash_attn_func(
 
     max_seqlen_q/max_seqlen_k: upper bound on the longest q/k range. Hard
         contract: per-range launch bounds are sized from these, so an
-        underestimate silently drops work; under ``deterministic`` the dQ
-        writers of the K tiles of a relation are numbered by
-        ``max_seqlen_k``, so an underestimate gives two K tiles one number
-        and the dQ merge runs out of order or hangs. Omitting falls back to
+        underestimate silently drops work. Omitting falls back to
         total_q/total_k — always safe, the loosest bound. Debug mode validates
         against the ranges (a sync).
 
@@ -2472,14 +2385,12 @@ def flex_flash_attn_func(
         An enabled cap cannot be combined with a user ``score_mod``.
 
     pack_gqa: fold the q heads of one kv head into the M dimension of the
-        forward. ``None`` packs GQA on the direct-store paths when the q-tile
-        size (128) is a multiple of ``nheads_q // nheads_kv``; a tile that
-        starts inside a token loses the TMA Q load and O store and runs slower
-        than unpacked, so ``None`` leaves such groups unpacked and ``True``
-        still packs them. The SM100/SM110 range atomic-merge path packs only
-        on request and requires that multiple. SM80 and ``range_merge`` always
-        run unpacked, including with ``pack_gqa=True``. The backward does not
-        read it; ``bwd_pack_factor`` sets the backward packing.
+        forward. ``None`` packs GQA when the q-tile size (128) is a multiple
+        of ``nheads_q // nheads_kv``, except on the SM100/SM110 range
+        atomic-merge path, where packing is opt-in and requires that multiple.
+        SM80 and ``range_merge`` always run unpacked, including with
+        ``pack_gqa=True``. The backward does not read it; ``bwd_pack_factor``
+        sets the backward packing.
 
     disable_fwd_atomic_reduction: caller contract that q_ranges are sorted
         and pairwise disjoint, giving every O and dQ row a unique writer.
@@ -2503,9 +2414,7 @@ def flex_flash_attn_func(
         relations sharing an outer interval into (group, pair) CSR form so
         forward skips the atomic O merge; backward derives the dual K-merge.
         SM100/SM110 only; requires both ``disable_*_atomic_reduction``
-        contracts. ``True`` builds the merge tables on device in every call
-        without host synchronization (CUDA-graph capturable); pass a
-        precomputed plan to reuse the tables across calls.
+        contracts.
 
     out_dtype: dtype of the returned O, fp32/fp16/bf16. None returns the input
         dtype. A dtype other than the input dtype requires SM100/SM110. With
@@ -2514,9 +2423,7 @@ def flex_flash_attn_func(
 
     sm_margin: number of SMs to reserve for concurrent kernels such as communication.
         Currently supported for q/k ranges on SM100/SM110; the forward with
-        head_dim 192 ignores it. ``num_sm - sm_margin`` must hold one cluster
-        of the launched kernel (two SMs for a 2-CTA kernel, such as the
-        backward at head_dim >= 128), otherwise ``ValueError`` is raised.
+        head_dim 192 ignores it.
 
     return_max_logits: fill ``meta.max_logits`` with the fp32 ``[nheads]``
         per-q-head maximum softmax logit (after scale and softcap, sinks
@@ -2548,20 +2455,8 @@ def flex_flash_attn_func(
         unsupported combination. Gradients differ from the unpacked backward
         only in the fp32 summation order. The forward is unaffected.
 
-    deterministic: bitwise-reproducible outputs and gradients, independent
-        of ``sm_margin``. Dense inputs order the dQ (and GQA dK/dV) reductions
-        on semaphores. Q/k ranges merge every overlapping row in a fixed
-        order: O/LSE by relation, dQ by (relation, K tile), reduced dK/dV by
-        (relation, q head); the kernels then launch persistent whatever
-        ``sm_margin``. Ranges need SM100/SM110 and ``head_dim == head_dim_v``
-        in {64, 128}, without block sparsity; the RangeMerge backward orders
-        dQ by (merged K group, K tile), and within one by pair. Other
-        architectures raise ``NotImplementedError``, except that the forward
-        alone runs under ``disable_fwd_atomic_reduction``, whose O rows have
-        one writer each, the RangeMerge forward included.
-        Opt-in: the ordered dQ merge makes the range backward several times
-        slower, more so with many K tiles per Q tile (see
-        MAGI_ATTENTION_DETERMINISTIC_MODE in env_variables.md).
+    deterministic: bitwise-reproducible outputs and gradients (ranges need
+        SM100/SM110, head_dim == head_dim_v in {64, 128}).
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /

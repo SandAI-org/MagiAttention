@@ -167,10 +167,9 @@ def validate_range_feature_support(
     ``has_user_score_mod`` is a caller-provided score_mod; softcap is native
     to the SM100/SM110 kernels and does not count.
 
-    ``bwd_head_dim`` applies only to backward. RangeMerge does not support
-    the mainloop for head dimension 192, which uses two CTAs and a single
-    pipeline stage for Q and Qt. Deterministic ranges are checked by
-    :func:`validate_range_deterministic`.
+    ``bwd_head_dim`` applies only to backward. RangeMerge does not support the
+    mainloop for head dimension 192, which uses two CTAs and a single pipeline
+    stage for Q and Qt.
     """
     per_range = isinstance(mask_types, torch.Tensor)
     if per_range and not has_ranges:
@@ -205,14 +204,6 @@ def validate_range_feature_support(
 
 
 def validate_persistent_grid(*, num_sm: int, sm_margin: int, cluster_size: int) -> None:
-    """Reject a persistent q/k-range launch whose SM budget holds no cluster.
-
-    A persistent launch caps its grid at ``num_sm - sm_margin`` CTAs rounded
-    down to whole clusters of ``cluster_size`` CTAs. A budget below one
-    cluster leaves an empty grid, which fails at launch with
-    ``cudaErrorInvalidConfiguration``. The cluster size is not reduced to fit
-    the budget, as it fixes the arithmetic tiling.
-    """
     if num_sm - sm_margin < cluster_size:
         raise ValueError(
             f"a persistent q/k-range launch needs num_sm - sm_margin ({num_sm} - "
@@ -229,28 +220,7 @@ def validate_range_deterministic(
     max_tickets: int,
     max_writer: int,
 ) -> None:
-    """Reject a deterministic q/k-range launch outside what the chain covers.
-
-    The range-lock chain is implemented at ``head_dim == head_dim_v`` in
-    {64, 128}, on a persistent grid whose SM budget is checked by
-    :func:`validate_persistent_grid`. ``max_tickets`` bounds the tile counter,
-    which ends at the ticket count plus the final claim of every cluster and
-    must stay within int32; a fwd ticket is ``tile_m`` rows of one range and
-    q head, or under PackGQA ``tile_m`` packed rows (``G`` per token) of one
-    range and kv head. ``max_writer`` bounds the largest writer number of the
-    launch's chains (fwd ``R``, bwd dQ ``R * num_k_tiles``, bwd dK/dV
-    ``R * G``), which must stay within int32.
-
-    The chained bwd dQ writer of cluster K tile ``n`` of relation ``r`` is
-    ``r * num_k_tiles + n + 1``, with ``num_k_tiles`` the cluster K tiles of
-    ``max_seqlen_k``; under RangeMerge ``r`` is the merged K group. When
-    ``use_dense_dqacc_for_ranges`` is active (disjoint ``q_ranges``), each
-    range owns isolated ``tile_m``-aligned ``dQacc`` slots and orders K tiles
-    on per-slot semaphores without a dQ chain. For the chained dQ path, writer
-    numbers are unique only if no K range is longer than ``max_seqlen_k``;
-    the caller guarantees it, and FFA debug mode checks it against the
-    ranges, as reading them back syncs.
-    """
+    """Tile counter adds one final claim per cluster; caller keeps K range lengths <= max_seqlen_k."""
     if head_dim != head_dim_v or head_dim not in (64, 128):
         raise NotImplementedError(
             "deterministic q/k ranges support head_dim == head_dim_v in "

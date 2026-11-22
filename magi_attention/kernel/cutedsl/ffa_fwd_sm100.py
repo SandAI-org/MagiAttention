@@ -212,11 +212,6 @@ def fwd_fp32_o_borrows_kv_smem(
 def fwd_overlaps_sO_sQ(
     *, head_dim_padded: int, head_dim_v_padded: int, is_split_kv: bool
 ) -> bool:
-    """Whether O is staged in the Q shared memory.
-
-    Such a kernel runs one tile per CTA and is never persistent, so its grid
-    is not bounded by ``sm_margin``.
-    """
     return (head_dim_padded == 192 and head_dim_v_padded >= 64) or (
         head_dim_v_padded >= 128 and is_split_kv
     )
@@ -262,9 +257,6 @@ class FFAFwdSm100:
         disable_fwd_atomic_reduction: bool = False,
         # GMEM O dtype on the atomic path.
         o_dtype: Type[cutlass.Numeric] = Float32,
-        # Deterministic range atomic forward: clusters claim every tile, the
-        # first included, in ticket order from the tile counter, the order in
-        # which the range-lock chain merges overlapping partials.
         deterministic: bool = False,
         debug_print: bool = False,
     ):
@@ -473,8 +465,6 @@ class FFAFwdSm100:
         )
         self.deterministic = deterministic
         if deterministic:
-            # The chain's progress argument needs every tile handed out by
-            # one zero-based counter, which only the DYNAMIC schedule has.
             assert (
                 self.scheduling_mode == SchedulingMode.DYNAMIC
             ), "deterministic forward needs persistent range scheduling"
@@ -793,7 +783,7 @@ class FFAFwdSm100:
         mRangeLocks: Optional[cute.Tensor] = None,
         max_seqlen_q: Int32 | None = None,
         mCuBatches: Optional[cute.Tensor] = None,  # [R + 1] CSR offsets for RangeMerge
-        mNumBatches: Optional[cute.Tensor] = None,  # [1] int32 active group count G
+        mNumBatches: Optional[cute.Tensor] = None,
         sm_margin: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
         mTileCounter: Optional[cute.Tensor] = None,
@@ -802,11 +792,6 @@ class FFAFwdSm100:
         mMaxLogits: Optional[cute.Tensor] = None,
         # tanh cap magnitude; required iff has_softcap.
         softcap: Float32 | None = None,
-        # Deterministic only, see range_chain: int32 (num_slots, num_lock_blocks)
-        # conflict state, zero before the launch, with num_slots at least the
-        # grid size. mRangeLocks is then the (num_lock_blocks, num_head, 2)
-        # chain state instead of the mutex. Under PackGQA both count blocks of
-        # packed rows (G * token + g) and the chain state's heads are kv heads.
         mConflictState: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
@@ -2145,7 +2130,6 @@ class FFAFwdSm100:
             )
 
             if const_expr(self.use_clc_scheduler):
-                # CLC writes a 16-byte response.
                 sched_pipeline = pipeline.PipelineClcFetchAsync.create(
                     barrier_storage=clc_mbar_ptr,
                     num_stages=self.sched_stages,
@@ -2179,7 +2163,6 @@ class FFAFwdSm100:
                 )
             else:
                 assert self.tile_scheduler_cls is SingleTileVarlenScheduler
-                # DYNAMIC publishes a 4-byte tile index.
                 tile_scheduler = SingleTileVarlenScheduler.create(
                     tile_sched_params,
                     dynamic=DynamicState.create(
@@ -4570,9 +4553,7 @@ class FFAFwdSm100:
         sm_stats_consumer_phase = Int32(0)
         o_corr_consumer_phase = Int32(0)
         corr_epi_producer_phase = Int32(1)
-        # Deterministic chain: this CTA is execution slot chain_slot of the
-        # conflict state, whose scan has recorded the relations below
-        # chain_scanned.
+        # chain_scanned advances monotonically with claimed tile batch_idx.
         chain_slot = cute.arch.block_idx()[0]
         chain_scanned = Int32(0)
 
@@ -5015,9 +4996,6 @@ class FFAFwdSm100:
                         # Skip lock/release for phantom stages (no valid rows).
                         tile_has_rows = num_rows > m_tile_idx * self.m_block_size
                         if const_expr(self.deterministic):
-                            # Relation batch_idx is writer batch_idx + 1; its
-                            # tile merges after the predecessor of each block
-                            # it has rows in, in place of the mutex.
                             (
                                 chain_left,
                                 chain_right,

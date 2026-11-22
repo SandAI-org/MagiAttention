@@ -12,73 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Deterministic range-lock chain of the SM100 range kernels.
-
-The writers of overlapping row ranges merge into a shared buffer in writer
-number order instead of lock-acquisition order, so the merged result does
-not depend on the grid or on timing. The CPU model of this protocol is
-``tests/test_kernel/cutedsl/test_ffa_range_deterministic_protocol.py``.
-
-Rows are grouped into physical blocks of ``block_size`` rows. A logical tile
-whose valid rows are ``[a, e)`` has one event on each block it has a valid
-row in, ``a // block_size`` to ``(e - 1) // block_size``; a tile of at most
-``block_size`` rows has events on at most two blocks. Protection rows past
-the range end, and stage tiles without a valid row, have no event. An event
-of writer ``w`` on block ``b``:
-
-1. waits until ``b`` publishes the predecessor: the closest lower writer
-   with an event on ``b``, 0 if none;
-2. merges its rows, makes the stores gpu-visible;
-3. arrives; the arrivals of ``w`` on ``b`` sum to 2 and the one completing
-   that sum publishes ``w`` on ``b``.
-
-A writer whose tiles sit in several work tiles (fwd O/LSE) arrives with
-weight 2 from a tile that is its only one with rows in ``b`` and 1 from
-each of two tiles sharing ``b`` (``tile_events``). A writer whose tiles all
-sit in one work tile (bwd dQ: one relation and cluster K tile walking the
-relation's active Q tiles in order) arrives once per active block, with
-weight 2, after the last of its active tiles with rows in ``b``
-(``tile_blocks``). Masked-out tiles without active work skip the chain; a
-straddling active tile whose neighbor tile is masked out promotes its weight
-on the shared block from 1 to 2.
-
-Under 2-CTA both CTAs of a cluster write parts of one logical tile. Each
-arrives the logical tile's weight on the logical tile's blocks after its own
-part is complete, and a block publishes once the sum reaches 2 times the
-cluster size, so the publish covers the parts of every CTA.
-
-The chain orders writers, not the two CTAs inside one. Under RangeMerge a
-writer's pairs may overlap in Q, and a row in the half of CTA 1 for one
-pair can be in the half of CTA 0 for the next, so the bwd dQ of a 2-CTA
-merged writer hands off between its CTAs when an active pair overlaps Q rows
-written by an earlier active pair in the group
-(``pair_handoff_arrive`` / ``pair_handoff_wait``).
-
-Chain state, int32 ``(num_blocks, num_heads, 2)``: per (block, head), the
-last published writer and the arrival count of the writer in flight.
-
-Conflict state, int32 ``(num_slots, num_blocks)``: per execution slot, the
-writers whose blocks the slot's incremental scan already recorded, each
-block holding the highest such writer with an event there. A slot walks its
-tiles in non-decreasing range order, so before a tile of range ``r`` it
-records the ranges in ``[r_last, r)`` and reads its predecessors back.
-
-Rows are buffer rows, ``rows_per_token`` per token of the ranges. A
-PackGQA buffer (fwd O/LSE with ``G`` q heads per kv head) has ``G`` rows
-per token, row ``G * token + g`` for q head ``g`` of a kv head, so token
-range ``[s, e)`` is the row range ``[s * G, e * G)``, the head axis of the
-chain state is the kv head, and ``num_blocks`` counts blocks of packed rows.
-Its tiles are cut from ``s * G``; ``G`` divides ``block_size``, so a tile
-starts on a token boundary and still has events on at most two blocks.
-
-A range is the scheduling unit the writer numbers count: a relation, or
-under RangeMerge a merged group, whose rows are the row ranges of its pairs,
-rows ``cu_batches[r]`` to ``cu_batches[r + 1]`` of the pair table. Pairs of
-one group may overlap, so a writer walking them can have rows in a block
-from several pairs; it arrives on the block after the last of them
-(``rows_have_block`` over the later pairs).
-"""
-
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -100,12 +33,8 @@ from .cutedsl_utils import (
 
 @dataclass
 class ChainTensors(ParamsBase):
-    """Chain and conflict state of one reduced buffer, zero before the launch.
-
-    Writer ``j`` of range ``r`` is number ``r * writer_stride + j + 1``, so
-    writer numbers grow with (range, j) and stay unique while ``j`` is below
-    ``writer_stride``.
-    """
+    """Zero-init: mChain[b, h] = [published, count], mConflict[slot, b] = last_writer.
+    Writer j of range r is r * writer_stride + j + 1 (0: none)."""
 
     mChain: cute.Tensor
     mConflict: cute.Tensor
@@ -119,9 +48,6 @@ def tile_blocks(
     tile_idx: Int32,
     block_size: cutlass.Constexpr[int],
 ):
-    """``(left, right)``: the first and last block tile ``tile_idx`` of a range
-    cut into ``block_size``-row tiles has a valid row in. The tile must have
-    a valid row; ``left == right`` means one block."""
     row = range_start + tile_idx * block_size
     row_end = cutlass.min(row + block_size, range_end)
     return row // block_size, (row_end - 1) // block_size
@@ -134,17 +60,8 @@ def tile_events(
     tile_idx: Int32,
     block_size: cutlass.Constexpr[int],
 ):
-    """Events of tile ``tile_idx`` of a range cut into ``block_size``-row tiles.
-
-    Returns ``(left, right, left_weight, right_weight)`` for a writer whose
-    tiles sit in several work tiles; ``left == right`` means a single event,
-    whose weight is ``left_weight``. The tile must have a valid row.
-    """
     row = range_start + tile_idx * block_size
     left, right = tile_blocks(range_start, range_end, tile_idx, block_size)
-    # Tiles start off a block boundary iff the range does; then tile k - 1
-    # also has rows in this tile's left block, and tile k + 1, if any, in its
-    # right block.
     unaligned = range_start % block_size != 0
     left_weight = Int32(2)
     if unaligned and tile_idx > 0:
@@ -168,25 +85,7 @@ def scan_conflicts(
     mCuBatches: Optional[cute.Tensor] = None,
     block_writer: Optional[Callable[[Int32, Int32, Int32], Int32]] = None,
 ) -> None:
-    """Record the blocks of the ranges in ``[range_from, range_to)`` for ``slot``.
-
-    Block ``b`` of range ``r`` gets ``last_writer(r)`` or ``block_writer(r, row, b)``,
-    the highest writer of ``r`` with events on ``b``; 0 means ``r`` has no
-    active work tile on ``b``, which records nothing, as does an empty range.
-    ``mRanges`` holds token ranges; range ``[s, e)`` covers the rows
-    ``[s, e) * rows_per_token``, the blocks ``tile_events`` gives for its
-    tiles. Without ``mCuBatches`` range ``r`` is row ``r`` of ``mRanges``;
-    with it, a merged group whose rows are ``mCuBatches[r]`` to
-    ``mCuBatches[r + 1]``. The whole warp calls; its lanes write the blocks
-    of one row in parallel, and any lane may read ``mConflict[slot, ...]``
-    after the return.
-
-    A block shared by consecutive rows is stored by different lanes (its
-    lane follows the row's first block), so the warp synchronizes after
-    every row, empty ones included: without it a lane's store of range
-    ``r`` may land after another lane's store of range ``r + 1`` and leave
-    a stale predecessor.
-    """
+    """Warp-collective scan; sync_warp per row orders lanes writing shared blocks."""
     lane = cute.arch.lane_idx()
     r = range_from
     while r < range_to:
@@ -249,9 +148,6 @@ def _record_row_blocks(
     monotonic_group_merge: cutlass.Constexpr[bool] = False,
     is_first_group_row: cutlass.Boolean = cutlass.Boolean(True),
 ) -> None:
-    """This lane's share of recording ``writer`` (or ``block_writer``) on the
-    blocks of row ``row`` of ``mRanges``, a token range of ``rows_per_token``
-    rows per token; nothing for an empty row or writer 0."""
     start = mRanges[row, 0] * rows_per_token
     end = mRanges[row, 1] * rows_per_token
     if const_expr(block_writer is None):
@@ -285,8 +181,6 @@ def rows_have_block(
     block: Int32,
     block_size: cutlass.Constexpr[int],
 ) -> cutlass.Boolean:
-    """Whether a row in ``[row_from, row_to)`` of ``mRanges`` has a valid row
-    in ``block``; empty rows have none."""
     found = cutlass.Boolean(False)
     row = row_from
     while row < row_to:
@@ -303,7 +197,6 @@ def rows_have_block(
 def record_conflict(
     mConflict: cute.Tensor, slot: Int32, block: Int32, writer: Int32
 ) -> None:
-    """Record ``writer`` as the last writer of ``block`` in ``slot``'s row."""
     mConflict[slot, block] = writer
 
 
@@ -311,18 +204,7 @@ def record_conflict(
 def wait_published(
     mChain: cute.Tensor, block: Int32, head: Int32, writer: Int32
 ) -> None:
-    """Spin until ``block`` of ``head`` publishes ``writer`` (acquire), then
-    order the acquired view before this thread's later async-proxy accesses.
-
-    The predecessor merged its rows with bulk reductions or stores (async
-    proxy) from another thread block, and the waiter's merge may be bulk
-    too. The acquire is in the generic proxy, and the PTX memory model
-    (8.9.5, proxy-preserved base causality) orders two async-proxy accesses
-    to one address only within one thread block; cross-proxy ordering needs
-    a proxy fence (9.7.9.26.2), so ``fence.proxy.async.global`` follows the
-    acquire. Without it a bulk reduction may read a row before the
-    predecessor's merge. The release side needs none: a completed bulk
-    operation is followed by an implicit async-to-generic proxy fence."""
+    """The fence orders the generic acquire before cross-CTA async-proxy ops."""
     ptr = elem_pointer(mChain, (block, head, 0))
     published = ld_acquire(ptr)
     while published != writer:
@@ -339,85 +221,30 @@ def arrive(
     weight: Int32,
     cluster_size: cutlass.Constexpr[int] = 1,
 ) -> None:
-    """Arrive with ``weight`` on ``block`` of ``head``; completing
-    ``2 * cluster_size`` publishes ``writer``.
-
-    One thread arrives per event. Before it, every thread of the CTA that
-    wrote rows of the event must have completed them at the destination
-    (bulk reductions: ``cp_async_bulk_wait_group(0, read=False)`` by the
-    issuing thread) and reached a CTA barrier with the arriving thread; the
-    arriving thread then fences (``fence_acq_rel_gpu``) so a multi-participant
-    ``acq_rel`` arrival or single-participant release publish carries those
-    writes. When one participant owns the full ``2 * cluster_size`` weight of
-    the writer on ``(block, head)``, ``count`` is ``0`` and untouched, so it
-    publishes ``writer`` directly."""
+    """Arrive after CTA writes complete; count resets before release publish while successor waits."""
     if weight == 2 * cluster_size:
         publish(mChain, block, head, writer)
     else:
         count_ptr = elem_pointer(mChain, (block, head, 1))
         prev = cute.arch.atomic_add(count_ptr, weight, sem="acq_rel", scope="gpu")
-        # Exact match: weights are those of the logical tile, so the arrival
-        # that completes the writer's sum is unique, and a sum stepping past
-        # the threshold never publishes (the successor then waits forever,
-        # which the tests detect, instead of starting early).
         if prev + weight == 2 * cluster_size:
-            # Every earlier participant arrived with acq_rel on count_ptr, and
-            # the next writer starts only after the release publish below, so
-            # resetting the count cannot race with either writer's arrivals.
             mChain[block, head, 1] = Int32(0)
             publish(mChain, block, head, writer)
 
 
 @cute.jit
 def publish(mChain: cute.Tensor, block: Int32, head: Int32, writer: Int32) -> None:
-    """Publish ``writer`` on ``block`` of ``head`` (release, gpu scope).
-
-    Called once per (writer, block), either directly by a single-participant
-    writer or by the arrival completing a multi-participant writer's weight
-    after resetting the count. Prior CTA-synchronized destination writes (and
-    earlier participants' acq_rel arrivals) precede this release store, so a
-    successor that reads ``writer`` with ``wait_published`` (acquire) sees
-    them.
-    """
     st_global_release_gpu_i32(elem_pointer(mChain, (block, head, 0)), writer)
 
 
 @cute.jit
 def pair_handoff_arrive(mbar: cute.Pointer, handoff: Int32, peer: Int32) -> None:
-    """Arrive on handoff ``handoff`` of a 2-CTA RangeMerge dQ writer, on the
-    barrier ``mbar[handoff & 1]`` of the peer CTA of rank ``peer``.
-
-    One thread per CTA arrives, at the start of every pair after the first,
-    after every bulk reduction of the earlier pairs completed
-    (``cp_async_bulk_wait_group(0, read=False)`` by the issuing thread) and
-    the issuing and arriving threads met at a CTA barrier. A completed bulk
-    reduction is followed by an implicit async-to-generic proxy fence (PTX
-    ISA 9.7.9.26.2), and the cluster-scope release carries the reduced rows
-    to the peer's wait. Handoffs alternate between two barriers of arrival
-    count 1: a CTA arrives on handoff ``k + 2`` only after its wait of
-    ``k + 1``, which needs the peer's arrival of ``k + 1``, issued after the
-    peer's wait of ``k``, so a barrier is at most one phase ahead of its
-    waiter; with one barrier the peer's arrivals of ``k`` and ``k + 1``
-    could both land before the wait of ``k``, and a parity wait reads two
-    completions as none."""
+    """Arrive after bulk reductions complete; alternating mbarriers bound the phase lead to one."""
     mbarrier_arrive_peer_release_cluster(mbar + (handoff & 1), peer)
 
 
 @cute.jit
 def pair_handoff_wait(mbar: cute.Pointer, handoff: Int32) -> None:
-    """Wait for the peer's arrival of handoff ``handoff`` on this CTA's
-    ``mbar[handoff & 1]`` (parity ``(handoff >> 1) & 1``), then order the
-    acquired view before this CTA's bulk reductions.
-
-    The thread that arrived waits, before the CTA barrier that precedes the
-    pair's first bulk reduction. Both CTAs must hand off at the same pairs,
-    or one waits forever. The acquire is in the generic proxy, the bulk
-    reductions that follow are in the async proxy, and the peer's reductions
-    of the same rows were made by another thread block: the PTX memory
-    model (8.9.5, proxy-preserved base causality) orders two async-proxy
-    accesses to one address only within one thread block, and cross-proxy
-    ordering needs a proxy fence (9.7.9.26.2), so ``fence.proxy.async.global``
-    follows the acquire; without it the reduction may read the row before
-    the peer's addition."""
+    """Both CTAs must hand off at the same pairs."""
     mbarrier_wait_acquire_cluster(mbar + (handoff & 1), (handoff >> 1) & 1)
     cute.arch.fence_proxy("async.global")

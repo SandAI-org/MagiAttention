@@ -322,7 +322,6 @@ class BlockInfo:
         seqlen_k: Int32,
         n_block: Int32,
     ) -> Tuple[Int32, Int32]:
-        """Static-mask ``[m_block_min, m_block_max)`` from raw sequence lengths."""
         pf = self.qhead_per_kvhead_packgqa
         if const_expr(pf > 1):
             assert not self.is_local, "packed bwd does not support local attention"
@@ -372,7 +371,6 @@ class BlockInfo:
         n_block: Int32,
         attn_type: Int32,
     ) -> Tuple[Int32, Int32]:
-        """Per-range ``[m_block_min, m_block_max)`` from raw sequence lengths."""
         pf = self.qhead_per_kvhead_packgqa
         m_block_min = Int32(0)
         m_block_max = Int32(0)
@@ -408,13 +406,7 @@ class BlockInfo:
         seqlen_k: Int32,
         m_block: Int32,
     ) -> Tuple[Int32, Int32]:
-        """Active backward K-tile interval ``[n_min, n_max)`` for ``m_block``.
-
-        Exact dual of :meth:`get_m_block_min_max`: for valid ``m_block`` and
-        ``n_block``, ``n_block in [n_min, n_max)`` iff
-        ``m_block in [m_min(n_block), m_max(n_block))``. Returns ``(0, 0)``
-        when ``m_block`` is out of bounds or no K tile is active on it.
-        """
+        """Exact dual of get_m_block_min_max_seqlens: n in [n_min, n_max) iff m in [m_min(n), m_max(n))."""
         pf = self.qhead_per_kvhead_packgqa
         if const_expr(pf > 1):
             assert not self.is_local, "packed bwd does not support local attention"
@@ -462,7 +454,6 @@ class BlockInfo:
         seqlen_info: SeqlenInfoQK,
         m_block: Int32,
     ) -> Tuple[Int32, Int32]:
-        """Active backward K-tile interval ``[n_min, n_max)`` for ``m_block``."""
         return self.get_n_block_min_max_for_m_block_seqlens(
             seqlen_info.seqlen_q, seqlen_info.seqlen_k, m_block
         )
@@ -475,14 +466,7 @@ class BlockInfo:
         m_block: Int32,
         attn_type: Int32,
     ) -> Tuple[Int32, Int32]:
-        """Active backward K-tile interval ``[n_min, n_max)`` for per-range masks.
-
-        Exact dual of :meth:`get_m_block_min_max_per_range` across all four
-        ``MT_MAP`` mask types: for valid ``m_block`` and ``n_block``,
-        ``n_block in [n_min, n_max)`` iff
-        ``m_block in [m_min(n_block), m_max(n_block))``. Returns ``(0, 0)``
-        when ``m_block`` is out of bounds or no K tile is active on it.
-        """
+        """Exact dual of get_m_block_min_max_per_range_seqlens: n in [n_min, n_max) iff m in [m_min(n), m_max(n))."""
         pf = self.qhead_per_kvhead_packgqa
         n_block_min = Int32(0)
         n_block_max = Int32(0)
@@ -522,7 +506,6 @@ class BlockInfo:
         m_block: Int32,
         attn_type: Int32,
     ) -> Tuple[Int32, Int32]:
-        """Active backward K-tile interval ``[n_min, n_max)`` for per-range masks."""
         return self.get_n_block_min_max_for_m_block_per_range_seqlens(
             seqlen_info.seqlen_q, seqlen_info.seqlen_k, m_block, attn_type
         )

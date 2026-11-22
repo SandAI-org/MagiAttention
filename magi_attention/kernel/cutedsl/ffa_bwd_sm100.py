@@ -831,17 +831,9 @@ class FFABwdSm100:
         mTileCounter: Optional[cute.Tensor] = None,
         # tanh cap magnitude; required iff has_softcap.
         softcap: Float32 | None = None,
-        # Deterministic q/k ranges only, see range_chain: the dQ chain state
-        # (num_q_blocks, num_head, 2) and conflict state (num_slots,
-        # num_q_blocks), zero before the launch; cluster K tile n of relation r
-        # is dQ writer r * dq_writer_stride + n + 1.
         mdQChain: Optional[cute.Tensor] = None,
         mdQConflict: Optional[cute.Tensor] = None,
         dq_writer_stride: Int32 | None = None,
-        # Deterministic q/k ranges with reduced dK/dV only: the dK/dV chain
-        # state (num_k_blocks, num_head_kv, 2) and conflict state (num_slots,
-        # num_k_blocks), zero before the launch, with cluster K tile rows per
-        # block.
         mdKVChain: Optional[cute.Tensor] = None,
         mdKVConflict: Optional[cute.Tensor] = None,
         aux_tensors: Optional[list] = None,
@@ -879,10 +871,6 @@ class FFABwdSm100:
         assert (mQRanges is None) == (
             mKRanges is None
         ), "mQRanges and mKRanges must be passed together"
-        # Batched sequences order the dQ writers of a Q block on semaphores
-        # indexed by (batch, m_block); disjoint q/k ranges with dense dQacc
-        # slots order active K tiles on per-slot semaphores; overlapping q/k
-        # ranges chain writers per physical row block.
         self.dense_deterministic = self.deterministic and mQRanges is None
         self.range_deterministic = self.deterministic and mQRanges is not None
         self.range_dq_chain = (
@@ -899,16 +887,9 @@ class FFABwdSm100:
             "the dQ chain comes with overlapping deterministic ranges"
         )
         if const_expr(self.range_deterministic):
-            # Progress requires every tile claimed in ticket order from one
-            # zero-based counter (DYNAMIC + claim_first_tile).
             assert self.scheduling_mode == SchedulingMode.DYNAMIC
             assert self.same_hdim_kv and self.tile_hdim in (64, 128)
             assert blocksparse_tensors is None
-        # Two pairs of one merged dQ writer may put one Q row in the row half
-        # of CTA 0 for one pair and of CTA 1 for the other; the chain orders
-        # writers, not the two CTAs inside one, so the reduce warps of the
-        # two CTAs hand off when an active pair overlaps Q rows written by an
-        # earlier active pair in the group (range_chain.pair_handoff_*).
         self.dq_pair_handoff = (
             self.range_dq_chain and self.range_merge and self.use_2cta_instrs
         )
@@ -937,8 +918,6 @@ class FFABwdSm100:
         )
 
         self.ranges_dkv_tma = mKRanges is not None and not self.dKV_postprocess
-        # Reduced dK/dV of q/k ranges have several writers per K row; the
-        # direct store has one.
         self.range_dkv_chain = self.range_deterministic and self.dKV_postprocess
         assert (
             mdKVChain is not None and mdKVConflict is not None
@@ -1427,10 +1406,7 @@ class FFABwdSm100:
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
             sm_margin=sm_margin,
-            # The range chains need every work tile of a writer to come before
-            # every work tile of the next writer: relation, then head, then K
-            # tile ascending. Head swizzle and SPT would interleave them, so
-            # spt and head_swizzle stay dense-only.
+            # Range chains require monotonic (relation, head, K-tile) launch order.
             lpt=self.spt,
             head_swizzle=self.dense_deterministic,
             mTileCounter=mTileCounter,
@@ -1460,7 +1436,6 @@ class FFABwdSm100:
         dynamic_schedule = self.scheduling_mode == SchedulingMode.DYNAMIC
         sched_mbar_size = 2 * self.sched_stages if dynamic_schedule else 0
         sched_response_size = self.sched_stages if dynamic_schedule else 0
-        # Two barriers alternate between consecutive pair handoffs.
         dq_pair_mbar_size = 2 if self.dq_pair_handoff else 0
 
         sdK_bytes = cute.size_in_bytes(self.dk_dtype, self.sdK_layout)
@@ -1533,7 +1508,6 @@ class FFABwdSm100:
                 dS_cluster_full_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
                 dS_cluster_leader_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
                 dQacc_empty_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
-                # Pair handoffs of a deterministic RangeMerge dQ writer
                 dq_pair_mbar_ptr: cute.struct.MemRange[cutlass.Int64, dq_pair_mbar_size]
 
                 # --- smem tensors ---
@@ -1625,7 +1599,6 @@ class FFABwdSm100:
                 sched_response: cute.struct.MemRange[Int32, sched_response_size]
                 # Tmem holding buffer ptr
                 tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
-                # Pair handoffs of a deterministic RangeMerge dQ writer
                 dq_pair_mbar_ptr: cute.struct.MemRange[cutlass.Int64, dq_pair_mbar_size]
 
                 # --- smem tensors ---
@@ -1825,9 +1798,6 @@ class FFABwdSm100:
                 else None
             ),
             (
-                # Writer q head g of relation r is r * G + g + 1; the group's
-                # single writer, when the fold covers every q head (MHA or
-                # cat_gqa), is r + 1.
                 range_chain.ChainTensors(
                     mdKVChain,
                     mdKVConflict,
@@ -2093,7 +2063,6 @@ class FFABwdSm100:
         if const_expr(self.dq_pair_handoff):
             assert dq_pair_mbar_ptr is not None
             if warp_idx == 4:
-                # One arrival per handoff: the peer CTA's reduce thread 0.
                 for i in range(2):
                     cute.arch.mbarrier_init(dq_pair_mbar_ptr + i, 1)
 
@@ -5500,8 +5469,6 @@ class FFABwdSm100:
         consumer_state_dPsum = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.dO_stage
         )
-        # dK/dV chain: the conflict-state scan has recorded the relations
-        # below chain_scanned for this CTA's slot.
         chain_scanned = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
@@ -6671,8 +6638,6 @@ class FFABwdSm100:
                         pipeline_dS.producer_commit(producer_state_dS)
                     producer_state_dS.advance()
 
-            # --- dK/dV chain: wait for the predecessor ---
-
             if const_expr(self.range_dkv_chain):
                 dkv_left = Int32(0)
                 dkv_right = Int32(0)
@@ -6711,6 +6676,7 @@ class FFABwdSm100:
                         tidx == 0,
                     )
                     self.compute_sync_barrier.arrive_and_wait()
+                    # Order tidx == 0's acquire before WG leader warps' TMA async-proxy ops.
                     if warp_idx % 4 == 0:
                         cute.arch.fence_proxy("async.global")
 
@@ -6764,11 +6730,8 @@ class FFABwdSm100:
                     is_print_block=is_print_block,
                 )
 
-            # --- dK/dV chain: arrive once both reductions landed ---
-
             if const_expr(self.range_dkv_chain):
                 if process_tile:
-                    # The leader warp of each compute WG issued its strips;
                     # read=False waits for the writes at the destination.
                     if warp_idx % 4 == 0:
                         cute.arch.cp_async_bulk_wait_group(0, read=False)
@@ -6895,7 +6858,6 @@ class FFABwdSm100:
         r: Int32,
         n_cta: Int32,
     ) -> cutlass.Boolean:
-        """Whether cluster K tile ``n_cta`` of relation/group ``r`` has active Q tiles."""
         seqlen_k = mKRanges[r, 1] - mKRanges[r, 0]
         active = cutlass.Boolean(False)
         if (
@@ -6962,8 +6924,6 @@ class FFABwdSm100:
         r: Int32,
         kb: Int32,
     ) -> Int32:
-        """Highest dK/dV writer of relation/group ``r`` active on physical K block ``kb``;
-        0 when every K tile of ``r`` touching ``kb`` is masked out."""
         block_rows = self.tile_n * self.cta_group_size
         k_s = mKRanges[r, 0]
         k_e = mKRanges[r, 1]
@@ -7017,14 +6977,6 @@ class FFABwdSm100:
         is_scan_warp: cutlass.Boolean,
         is_waiter: cutlass.Boolean,
     ):
-        """dK/dV range chain (see range_chain): wait for this active tile's predecessor.
-
-        Masked-out K tiles skip the chain completely. When a physical K block
-        is straddled by two K tiles of the same relation/group and the neighbor
-        tile is masked out, this tile promotes its weight on that block from 1
-        to 2. ``scan_conflicts`` runs lazily only when ``group_rank == 0``
-        needs ``mConflict``.
-        """
         k_start = seqlen_info.offset_k
         block_rows = self.tile_n * self.cta_group_size
         n_cta = n_block // self.cta_group_size
@@ -7130,15 +7082,6 @@ class FFABwdSm100:
             chain_scanned,
         )
 
-    # dQ range chain (see range_chain). Cluster K tile n of relation r is one
-    # writer of the active Q rows of r; its work tile walks the active Q tiles
-    # in order, waiting on each touched Q block at its first active Q tile and
-    # arriving once per active Q block, with weight 2, after its last active Q
-    # tile touching that block. On physical Q block b, the predecessor is the
-    # largest n' < n active on b in r (or across all pairs of merged K group r
-    # under RangeMerge), or mConflict[slot, b] when n is the first active K
-    # tile on b in r.
-
     @cute.jit
     def _dq_pair_max_active_n1_on_block(
         self,
@@ -7149,7 +7092,6 @@ class FFABwdSm100:
         attn_type: Int32,
         block: Int32,
     ) -> Int32:
-        """1 + largest active K tile of a pair on physical Q ``block``; 0 if none."""
         max_n1 = Int32(0)
         if seqlen_q > 0 and seqlen_k > 0:
             if const_expr(
@@ -7199,7 +7141,6 @@ class FFABwdSm100:
         row: Int32,
         block: Int32,
     ) -> Int32:
-        """Highest dQ writer of ``row`` (in ``group_idx``) active on ``block``; 0 if none."""
         q_s = mQRanges[row, 0]
         q_e = mQRanges[row, 1]
         k_s = mKRanges[group_idx, 0]
@@ -7231,7 +7172,6 @@ class FFABwdSm100:
         right: Int32,
         need_prev_n: cutlass.Boolean,
     ):
-        """Single-pass RangeMerge scan for overlapping Q blocks ``[left, right]``."""
         earlier_left = cutlass.Boolean(False)
         earlier_right = cutlass.Boolean(False)
         later_left = cutlass.Boolean(False)
@@ -7367,7 +7307,6 @@ class FFABwdSm100:
         seqlen_k_group: Int32 = Int32(0),
         group_has_block_overlap: cutlass.Boolean = cutlass.Boolean(False),
     ):
-        """Plan dQ chain waits and arrivals for active ``m_block`` before T2R."""
         q_start = seqlen_info.offset_q
         left, right = range_chain.tile_blocks(
             q_start, q_start + seqlen_info.seqlen_q, m_block, self.tile_m
@@ -7696,11 +7635,7 @@ class FFABwdSm100:
             pipeline.PipelineUserType.Producer, self.sdQacc_stage
         )
         read_flag = const_expr(not self.deterministic)
-        # dQ chain: the conflict-state scan has recorded the relations below
-        # chain_scanned for this CTA's slot.
         chain_scanned = Int32(0)
-        # Pair handoffs this CTA took part in, across q heads and work tiles;
-        # equal on both CTAs, which walk the same tiles and pairs.
         pair_handoff = Int32(0) if const_expr(self.dq_pair_handoff) else None
 
         # /////////////////////////////////////////////////////////////////////////////
@@ -8115,12 +8050,7 @@ class FFABwdSm100:
                             seqlen_pair, n_block_cta_group, attn_type_pair
                         )
                         if const_expr(self.dq_pair_handoff):
-                            # Hand off only when this active pair overlaps Q rows
-                            # written by an earlier active pair in the group.
-                            # Bounds are cluster-uniform, so both CTAs count the
-                            # same handoffs. The wait comes after the first Q
-                            # tile's TMEM release so a slower peer does not
-                            # delay the dQ MMA.
+                            # Cluster-uniform overlap keeps pair_handoff identical on both CTAs.
                             assert dq_pair_mbar_ptr is not None
                             needs_handoff = cutlass.Boolean(False)
                             if hi_p > lo_p:
@@ -8266,6 +8196,7 @@ class FFABwdSm100:
                                             dq_wait_right,
                                             scratch_head,
                                         )
+                                # Placed after TMEM consumer_release so peer sync does not block dQ MMA.
                                 if const_expr(self.dq_pair_handoff and stage == 0):
                                     if needs_handoff and it == 0 and tidx == 0:
                                         range_chain.pair_handoff_wait(
@@ -8274,6 +8205,7 @@ class FFABwdSm100:
 
                                 # Sync before S2G copy
                                 self.reduce_sync_barrier.arrive_and_wait()
+                                # Order tidx == 0's acquire before is_tma_warp's async-proxy bulk ops.
                                 if const_expr(self.range_dq_chain and stage == 0):
                                     if is_tma_warp:
                                         cute.arch.fence_proxy("async.global")
@@ -8527,6 +8459,7 @@ class FFABwdSm100:
 
                             # Sync before S2G copy
                             self.reduce_sync_barrier.arrive_and_wait()
+                            # Order prior acquire before is_tma_warp's async-proxy bulk ops.
                             if const_expr(
                                 (self.range_dq_chain or self.range_dq_semaphore)
                                 and stage == 0
