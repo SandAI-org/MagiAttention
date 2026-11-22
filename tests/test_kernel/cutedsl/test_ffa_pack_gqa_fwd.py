@@ -503,9 +503,6 @@ class TestFFAPackGqaFwd(TestCase):
 
     @parameterize("group", [4, 3, 6])
     def test_direct_store_default_packs_only_when_group_divides_tile_m(self, group):
-        """``pack_gqa=None`` packs the direct-store fwd (ranges and dense)
-        only when the q tile is a multiple of the group; ``True`` still packs
-        a non-dividing group. Both give the reference output."""
         expected = _TILE_M % group == 0
         relations, total_q, total_k = _overlapping_relations(
             [20, 150], coverage=1, mask_types=[MT_MAP.full, MT_MAP.causal]
@@ -515,7 +512,8 @@ class TestFFAPackGqaFwd(TestCase):
         covered = torch.cat(
             [torch.arange(s, e, device=q.device) for (s, e), _, _ in relations]
         )
-        for pack, pack_expected in ((None, expected), (True, True)):
+
+        def ranges_fwd(pack: bool | None):
             with record_fwd_kernels() as built:
                 out, lse = _flex_flash_attn_fwd(
                     q,
@@ -527,13 +525,16 @@ class TestFFAPackGqaFwd(TestCase):
                     out_dtype=torch.float32,
                 )
             (kernel,) = built
-            self.assertEqual(kernel.pack_gqa, pack_expected, (group, pack))
-            torch.testing.assert_close(
-                out[covered], out_ref[covered], atol=_TOL, rtol=_TOL
-            )
-            torch.testing.assert_close(
-                lse[covered], lse_ref[covered], atol=1e-3, rtol=1e-3
-            )
+            return kernel, out, lse
+
+        kernel, out, lse = ranges_fwd(None)
+        self.assertEqual(kernel.pack_gqa, expected, (group, None))
+        torch.testing.assert_close(out[covered], out_ref[covered], atol=_TOL, rtol=_TOL)
+        torch.testing.assert_close(lse[covered], lse_ref[covered], atol=1e-3, rtol=1e-3)
+        kernel, out, lse = ranges_fwd(True)
+        self.assertEqual(kernel.pack_gqa, True, (group, True))
+        torch.testing.assert_close(out[covered], out_ref[covered], atol=_TOL, rtol=_TOL)
+        torch.testing.assert_close(lse[covered], lse_ref[covered], atol=1e-3, rtol=1e-3)
 
         dense = ([0, total_q], [0, total_k], MT_MAP.full)
         out_ref, _, _ = _ref_fwd(q, k, v, [dense])

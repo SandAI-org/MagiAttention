@@ -14,7 +14,6 @@
 
 import unittest
 from typing import Any
-from unittest import mock
 
 import pytest
 import torch
@@ -57,14 +56,8 @@ from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeMgr,
     init_dist_attn_runtime_mgr,
 )
-from magi_attention.kernel.cutedsl.cache_utils import JITCache
-from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
-from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
-from magi_attention.kernel.cutedsl.flex_flash_attn import (
-    _flex_flash_attn_bwd,
-    _flex_flash_attn_fwd,
-)
 from magi_attention.testing import parameterize, ref_attn_func
+from magi_attention.testing.cutedsl_utils import record_bwd_kernels
 from magi_attention.testing.dist_common import (
     INTERFACE,
     NAME,
@@ -786,13 +779,6 @@ class TestInterfaceWithWorldSize4(TestInterfaceBaseWithWorldSize1):
     @skip_if_lt_x_gpu(4)
     @with_comms
     def test_cutedsl_deterministic_mode_bitwise_through_public_api(self):
-        """MAGI_ATTENTION_DETERMINISTIC_MODE on the cutedsl backend through
-        magi_attn_flex_dispatch / calc_attn / undispatch: every built range
-        kernel is deterministic, the local O, LSE, dQ, dK and dV repeat bit
-        for bit, and the result matches the causal reference. The causal mask
-        is split into three relations, two of them sharing the q rows
-        [512, 1024), so the forward merges overlapping O rows and dK/dV pass
-        through the group reduce."""
         if torch.cuda.get_device_capability()[0] not in (10, 11):
             self.skipTest("deterministic q/k ranges require SM100/SM110")
         total_seqlen, nhq, nhk, head_dim = 1024, 8, 4, 128
@@ -804,17 +790,6 @@ class TestInterfaceWithWorldSize4(TestInterfaceBaseWithWorldSize1):
         grad_total_out = torch.randn_like(total_q)
         for t in (total_q, total_k, total_v, grad_total_out):
             dist.broadcast(t, src=0, group=self.nccl_group)
-
-        built: list = []
-
-        def recording(cls):
-            init = cls.__init__
-
-            def record(obj, *args, **kwargs):
-                init(obj, *args, **kwargs)
-                built.append(obj)
-
-            return mock.patch.object(cls, "__init__", record)
 
         with switch_env(
             {
@@ -853,15 +828,19 @@ class TestInterfaceWithWorldSize4(TestInterfaceBaseWithWorldSize1):
                 undispatch(local_out, key=key).backward(grad_total_out)
                 return local_out.detach(), meta.lse, *(t.grad for t in leaves)
 
-            with recording(FFAFwdSm100), recording(FFABwdSm100), mock.patch.object(
-                _flex_flash_attn_fwd, "compile_cache", JITCache()
-            ), mock.patch.object(_flex_flash_attn_bwd, "compile_cache", JITCache()):
-                first = run()
-                second = run()
+            with record_bwd_kernels() as built:
+                out, lse, dq, dk, dv = run()
+                out_2, lse_2, dq_2, dk_2, dv_2 = run()
 
-        self.assertTrue(built and all(kernel.deterministic for kernel in built))
-        for name, got, want in zip(("out", "lse", "dq", "dk", "dv"), second, first):
-            self.assertTrue(torch.equal(got, want), f"{name} differs between runs")
+        self.assertTrue(built)
+        self.assertEqual(
+            [kernel.deterministic for kernel in built], [True] * len(built)
+        )
+        self.assertTrue(torch.equal(out_2, out), "out differs between runs")
+        self.assertTrue(torch.equal(lse_2, lse), "lse differs between runs")
+        self.assertTrue(torch.equal(dq_2, dq), "dq differs between runs")
+        self.assertTrue(torch.equal(dk_2, dk), "dk differs between runs")
+        self.assertTrue(torch.equal(dv_2, dv), "dv differs between runs")
 
         leaves = [
             t.detach().clone().requires_grad_() for t in (total_q, total_k, total_v)
@@ -877,16 +856,47 @@ class TestInterfaceWithWorldSize4(TestInterfaceBaseWithWorldSize1):
             return_lse=True,
         )
         total_out_ref.backward(grad_total_out)
-        refs = (total_out_ref, meta_ref.lse, *(t.grad for t in leaves))
-        for name, got, ref in zip(("out", "lse", "dq", "dk", "dv"), first, refs):
-            assert_close(
-                undispatch(got, key=key),
-                ref,
-                atol=EPSILON,
-                rtol=5e-3 if name == "lse" else 5e-2,
-                mismatch_threshold=0.01 if name == "lse" else 0.08,
-                test_case=name,
-            )
+        dq_ref, dk_ref, dv_ref = (t.grad for t in leaves)
+        assert_close(
+            undispatch(out, key=key),
+            total_out_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="out",
+        )
+        assert_close(
+            undispatch(lse, key=key),
+            meta_ref.lse,
+            atol=EPSILON,
+            rtol=5e-3,
+            mismatch_threshold=0.01,
+            test_case="lse",
+        )
+        assert_close(
+            undispatch(dq, key=key),
+            dq_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="dq",
+        )
+        assert_close(
+            undispatch(dk, key=key),
+            dk_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="dk",
+        )
+        assert_close(
+            undispatch(dv, key=key),
+            dv_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="dv",
+        )
 
 
 class TestInterfaceWithWorldSize5(TestInterfaceBaseWithWorldSize1):

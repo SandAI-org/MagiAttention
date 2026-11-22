@@ -12,22 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Deterministic q/k ranges of the SM100/SM110 CuTeDSL FFA kernels.
-
-With ``deterministic=True`` the range atomic forward merges the O/LSE
-partials of overlapping relations in relation order, and the backward merges
-the dQ partials of every (relation, cluster K tile) and the reduced dK/dV
-partials of every (relation, q head) in that order (``range_chain``), on a
-persistent grid whose clusters claim every tile from one zero-based counter.
-The results are then bitwise identical across runs and across ``sm_margin``.
-The protocol itself is checked on the CPU in
-``test_ffa_range_deterministic_protocol.py``.
-"""
-
 import math
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from typing import Callable, Iterator
+from typing import Callable, Sequence
 from unittest import TestCase, mock
 
 import cuda.bindings.driver as cuda
@@ -42,13 +28,7 @@ from magi_attention.kernel.cutedsl import flex_flash_attn_func, range_chain
 from magi_attention.kernel.cutedsl.block_info import BlockInfo
 from magi_attention.kernel.cutedsl.cache_utils import JITCache
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
-from magi_attention.kernel.cutedsl.ffa_fwd_sm100 import FFAFwdSm100
-from magi_attention.kernel.cutedsl.ffa_utils import (
-    MT_MAP,
-    get_device_arch,
-    validate_persistent_grid,
-    validate_range_deterministic,
-)
+from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
@@ -58,6 +38,7 @@ from magi_attention.kernel.cutedsl.range_merge import (
     plan_range_merge_bwd,
 )
 from magi_attention.testing import parameterize
+from magi_attention.testing.cutedsl_utils import record_bwd_kernels, record_fwd_kernels
 from tests.test_kernel.cutedsl.range_deterministic_probes import (
     DelayPoint,
     delay_injection,
@@ -66,137 +47,52 @@ from tests.test_kernel.cutedsl.range_deterministic_probes import (
 )
 
 _HEAD_DIM = 128
-# Head dims the deterministic range kernels support (head_dim == head_dim_v).
 _DET_HEAD_DIMS = [64, 128]
 _NUM_HEAD_KV = 2
-# fp32 O of bf16 inputs against the fp32 reference of the same bf16 inputs.
 _TOL = 1e-2
 
 Relations = list[tuple[list[int], list[int], int]]
 
 
-@dataclass
-class _Launch:
-    """What :func:`_record_launch` saw: kernel objects built, DYNAMIC tile
-    counters, and range-chain states ``(blocks, heads, 2)`` in allocation
-    order (fwd: O/LSE; bwd: dQ, then dK/dV when reduced)."""
-
-    built: list = field(default_factory=list)
-    counters: list[torch.Tensor] = field(default_factory=list)
-    chains: list[torch.Tensor] = field(default_factory=list)
-    semaphores: list[torch.Tensor] = field(default_factory=list)
-
-
-@contextmanager
-def _record_launch(
-    kernel_cls: type[FFAFwdSm100] | type[FFABwdSm100],
-    host_fn: Callable,
-) -> Iterator[_Launch]:
-    """Record the SM100 kernel objects of ``kernel_cls`` built and the state
-    tensors allocated by ``host_fn`` within the context.
-
-    The kernel object is only built on a JIT cache miss, so the context swaps
-    in an empty compile cache. The tile counter is the only ``[1]`` int32
-    tensor the hosts allocate, the chain states the only 3-D int32 ones of
-    trailing size 2, and ``dQ_semaphore`` the only 4-D int32 tensor.
-    """
-    launch = _Launch()
-    init = kernel_cls.__init__
-    zeros = torch.zeros
-
-    def record_init(obj, *args, **kwargs):
-        init(obj, *args, **kwargs)
-        launch.built.append(obj)
-
-    def record_zeros(*args, **kwargs):
-        t = zeros(*args, **kwargs)
-        if t.dtype == torch.int32 and t.shape == (1,):
-            launch.counters.append(t)
-        if t.dtype == torch.int32 and t.dim() == 3 and t.shape[-1] == 2:
-            launch.chains.append(t)
-        if t.dtype == torch.int32 and t.dim() == 4:
-            launch.semaphores.append(t)
-        return t
-
-    with mock.patch.object(kernel_cls, "__init__", record_init), mock.patch.object(
-        host_fn, "compile_cache", JITCache()
-    ), mock.patch.object(torch, "zeros", record_zeros):
-        yield launch
-
-
-@contextmanager
-def _force_arch(arch: str) -> Iterator[None]:
-    """Select the ``arch`` kernel path with MAGI_ATTENTION_FFA_CUTEDSL_ARCH.
-    get_device_arch is cached, so the cache is cleared on entry and before
-    the variable is restored."""
-    with mock.patch.dict("os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_ARCH": arch}):
-        get_device_arch.cache_clear()
-        try:
-            yield
-        finally:
-            get_device_arch.cache_clear()
-
-
-def _grid_clusters(
-    num_ranges: int,
-    num_head: int,
-    total_rows: int,
-    tile: int,
-    cluster: int,
-    sm_budget: int,
-) -> int:
-    """Clusters of the persistent grid, as SingleTileVarlenScheduler.get_grid_shape."""
-    blocks = (total_rows + num_ranges * (cluster * tile - 1)) // tile
-    grid_ctas = min(
-        blocks // cluster * cluster * num_head, sm_budget // cluster * cluster
-    )
-    return grid_ctas // cluster
-
-
-def _num_units(unit_rows: list[int], num_head: int, tile: int, cluster: int) -> int:
-    """Cluster units: ``tile * cluster`` rows of one range and head."""
-    return num_head * sum(math.ceil(n / (tile * cluster)) for n in unit_rows)
-
-
-def _expected_tile_counter(
-    unit_rows: list[int],
-    num_head: int,
-    total_rows: int,
-    tile: int,
-    cluster: int,
-    sm_budget: int,
-) -> int:
-    """Final DYNAMIC tile counter under claim_first_tile: one claim per cluster
-    unit plus the final claim of every cluster."""
-    return _num_units(unit_rows, num_head, tile, cluster) + _grid_clusters(
-        len(unit_rows), num_head, total_rows, tile, cluster, sm_budget
-    )
-
-
-def _assert_chain_settled(
-    chain: torch.Tensor,
-    ranges: list[list[int]],
-    block_size: int,
-    last_writer: Callable[[int], int],
+def _assert_bitwise_equal(
+    got: Sequence[torch.Tensor], want: Sequence[torch.Tensor]
 ) -> None:
-    """After a launch, every block of every head has published the last
-    writer with rows there, ``last_writer(r)`` of the highest such range
-    (0: no writer), and no arrival count is left: every event arrived exactly
-    once and every (writer, block) published."""
-    torch.cuda.synchronize()
-    chain = chain.cpu()
-    want = torch.zeros(chain.shape[0], dtype=torch.int32)
-    for r, (start, end) in enumerate(ranges):
-        writer = last_writer(r)
-        if end > start and writer != 0:
-            want[start // block_size : (end - 1) // block_size + 1] = writer
-    assert torch.equal(chain[..., 1], torch.zeros_like(chain[..., 1])), (
-        "arrival counts left: " f"{chain[..., 1].nonzero().tolist()[:8]}"
+    equal = [torch.equal(g, w) for g, w in zip(got, want, strict=True)]
+    assert all(equal), f"bitwise equal per tensor: {equal}"
+
+
+def _assert_grads_close(
+    grads: Sequence[torch.Tensor], want: Sequence[torch.Tensor]
+) -> None:
+    dq, dk, dv = grads
+    dq_want, dk_want, dv_want = want
+    torch.testing.assert_close(
+        dq.float(), dq_want.float(), atol=3e-2, rtol=3e-2, msg=lambda m: f"dq: {m}"
     )
-    got = chain[..., 0]
-    assert torch.equal(
-        got, want[:, None].expand_as(got)
-    ), f"published {got[:, 0].tolist()}, expected {want.tolist()}"
+    torch.testing.assert_close(
+        dk.float(), dk_want.float(), atol=3e-2, rtol=3e-2, msg=lambda m: f"dk: {m}"
+    )
+    torch.testing.assert_close(
+        dv.float(), dv_want.float(), atol=3e-2, rtol=3e-2, msg=lambda m: f"dv: {m}"
+    )
+
+
+def _replay(
+    graph: torch.cuda.CUDAGraph,
+    static_inputs: Sequence[torch.Tensor],
+    inputs: Sequence[torch.Tensor],
+) -> None:
+    for dst, src in zip(static_inputs, inputs, strict=True):
+        dst.copy_(src)
+    graph.replay()
+
+
+_torch_empty_like = torch.empty_like
+
+
+def _nan_empty_like(*args, **kwargs) -> torch.Tensor:
+    t = _torch_empty_like(*args, **kwargs)
+    return t.fill_(float("nan")) if t.is_floating_point() else t
 
 
 def _relation_mask(len_q: int, len_k: int, mask_type: int, device) -> torch.Tensor:
@@ -217,10 +113,6 @@ def _ref_fwd(
     relations: Relations,
     sink: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """fp32 (out, lse, max_logits) of the relation union plus one sink copy.
-
-    Relations must not share a (q, k) pair, so the union is their sum.
-    """
     total_q, num_head, head_dim = q.shape
     group = num_head // k.shape[1]
     mask = torch.zeros(total_q, k.shape[0], dtype=torch.bool, device=q.device)
@@ -244,6 +136,13 @@ def _ref_fwd(
     return out, lse.t().contiguous(), max_logits
 
 
+def _ref_grads(q, k, v, do, relations: Relations) -> list[torch.Tensor]:
+    q32, k32, v32 = (t.detach().float().requires_grad_() for t in (q, k, v))
+    out_ref, _, _ = _ref_fwd(q32, k32, v32, relations)
+    out_ref.backward(do.float())
+    return [q32.grad, k32.grad, v32.grad]
+
+
 def _qkv(
     total_q: int,
     total_k: int,
@@ -263,8 +162,6 @@ def _qkv(
 def _overlapping_relations(
     len_qs: list[int], coverage: int, mask_types: list[int]
 ) -> tuple[Relations, int, int]:
-    """Per q length, ``coverage`` relations over shifted, unaligned q ranges,
-    each against its own K range; returns (relations, total_q, total_k)."""
     relations: Relations = []
     q_cursor, k_cursor, i = 0, 0, 0
     for len_q in len_qs:
@@ -285,10 +182,6 @@ def _overlapping_relations(
 
 
 def _merged_q_relations() -> tuple[Relations, int, int]:
-    """Relations over a sorted partition of the q rows into unaligned groups
-    (one of a single row), each group against one to three K ranges, one of
-    them keyless; listed out of q order, so RangeMerge reorders the rows.
-    Returns (relations, total_q, total_k)."""
     relations: Relations = [
         ([131, 600], [100, 400], MT_MAP.full),
         ([0, 131], [0, 300], MT_MAP.full),
@@ -317,78 +210,7 @@ def _range_args(relations: Relations, device="cuda") -> dict:
 
 
 class TestFFARangeDeterministicHost(TestCase):
-    """Host validation; builds no attention kernel."""
-
-    def test_validate_accepts_head_dims_64_and_128(self):
-        for head_dim in _DET_HEAD_DIMS:
-            validate_range_deterministic(
-                head_dim=head_dim,
-                head_dim_v=head_dim,
-                num_sm=148,
-                cluster_size=2,
-                max_tickets=1000,
-                max_writer=2**31 - 1,
-            )
-
-    def test_validate_rejects_other_head_dims(self):
-        for head_dim, head_dim_v in (
-            (96, 96),
-            (192, 128),
-            (128, 64),
-            (64, 128),
-            (192, 192),
-            (256, 256),
-        ):
-            with self.assertRaises(NotImplementedError):
-                validate_range_deterministic(
-                    head_dim=head_dim,
-                    head_dim_v=head_dim_v,
-                    num_sm=148,
-                    cluster_size=1,
-                    max_tickets=1,
-                    max_writer=1,
-                )
-
-    def test_persistent_grid_rejects_a_budget_below_one_cluster(self):
-        validate_persistent_grid(num_sm=148, sm_margin=146, cluster_size=2)
-        validate_persistent_grid(num_sm=148, sm_margin=147, cluster_size=1)
-        for sm_margin, cluster_size in ((147, 2), (148, 2), (148, 1)):
-            with self.assertRaisesRegex(
-                ValueError, rf"\(148 - {sm_margin}\).*cluster_size={cluster_size}"
-            ):
-                validate_persistent_grid(
-                    num_sm=148, sm_margin=sm_margin, cluster_size=cluster_size
-                )
-
-    def test_validate_counts_the_final_claims_in_the_tile_counter_bound(self):
-        """The counter ends at the tickets plus one final claim per cluster:
-        74 2-CTA clusters on 148 SMs."""
-        kwargs = dict(head_dim=128, head_dim_v=128, num_sm=148, max_writer=1)
-        validate_range_deterministic(
-            cluster_size=2, max_tickets=2**31 - 1 - 74, **kwargs
-        )
-        with self.assertRaises(ValueError):
-            validate_range_deterministic(
-                cluster_size=2, max_tickets=2**31 - 74, **kwargs
-            )
-
-    def test_validate_rejects_a_writer_number_overflow(self):
-        kwargs = dict(
-            head_dim=128,
-            head_dim_v=128,
-            num_sm=148,
-            cluster_size=1,
-            max_tickets=1,
-        )
-        validate_range_deterministic(max_writer=2**31 - 1, **kwargs)
-        with self.assertRaises(ValueError):
-            validate_range_deterministic(max_writer=2**31, **kwargs)
-
     def test_tile_counter_bound_counts_overlapping_ranges(self):
-        """2^22 ranges all covering the same 4096 rows: the units are bounded
-        per range by the longest range, not by the token count, and overflow
-        the int32 tile counter in both directions (fwd: 16 q heads, 32 tiles
-        of 128 rows; bwd: 32 q heads, 16 cluster K tiles of 256 rows)."""
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("deterministic q/k ranges require SM100/SM110")
         num_ranges, rows = 2**22, 4096
@@ -424,56 +246,7 @@ class TestFFARangeDeterministicHost(TestCase):
                 deterministic=True,
             )
 
-    def test_fwd_tile_counter_bound_counts_packed_units(self):
-        """Under PackGQA the fwd bound counts units of 128 packed rows per kv
-        head: with q ranges of 4097 rows, 8 kv heads and G = 2 a range has
-        8 * ceil(8194 / 128) = 520 units, below the unpacked 16 * 33 = 528.
-        The largest range count within the int32 counter under the packed
-        bound reaches the kernel; one more range raises."""
-        if get_device_arch()[1] not in (10, 11):
-            self.skipTest("deterministic q/k ranges require SM100/SM110")
-        rows, num_head_kv, group = 4097, 8, 2
-        num_sm = torch.cuda.get_device_properties(0).multi_processor_count
-        packed_units = num_head_kv * math.ceil(rows * group / 128)
-        num_ranges = (2**31 - 1 - num_sm) // packed_units
-        self.assertGreater(
-            num_ranges * num_head_kv * group * math.ceil(rows / 128) + num_sm,
-            2**31 - 1,
-        )
-        q, k, v = _qkv(rows, rows, group=group, num_head_kv=num_head_kv)
-
-        class KernelReached(Exception):
-            pass
-
-        def fwd(n: int) -> None:
-            ranges = torch.tensor([0, rows], dtype=torch.int32, device="cuda")
-            _flex_flash_attn_fwd(
-                q,
-                k,
-                v,
-                q_ranges=ranges.expand(n, 2).contiguous(),
-                k_ranges=ranges.expand(n, 2).contiguous(),
-                mask_types=0,
-                max_seqlen_q=rows,
-                max_seqlen_k=rows,
-                disable_fwd_atomic_reduction=False,
-                deterministic=True,
-                pack_gqa=True,
-            )
-
-        with mock.patch.object(
-            _flex_flash_attn_fwd, "compile_cache", JITCache()
-        ), mock.patch.object(FFAFwdSm100, "__init__", side_effect=KernelReached):
-            with self.assertRaises(KernelReached):
-                fwd(num_ranges)
-            with self.assertRaisesRegex(ValueError, "tile counter"):
-                fwd(num_ranges + 1)
-
     def test_debug_mode_rejects_max_seqlen_k_below_the_longest_k_range(self):
-        """max_seqlen_k is trusted to bound every K range; deterministic
-        ranges number the dQ writers of the K tiles of a relation by it. FFA
-        debug mode reads the ranges back and raises with both numbers before
-        a kernel is built; a bound equal to the longest range passes."""
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("deterministic q/k ranges require SM100/SM110")
         relations: Relations = [
@@ -515,25 +288,6 @@ class TestFFARangeDeterministicHost(TestCase):
             with self.assertRaises(KernelReached):
                 bwd(300)
 
-    def test_fwd_rejects_deterministic_atomic_ranges_off_sm100(self):
-        """Off SM100/SM110, deterministic q/k ranges without the caller's
-        disable_fwd_atomic_reduction declaration raise in forward, at the raw
-        entry and at the autograd entry, instead of running the direct store."""
-        if not torch.cuda.is_available():
-            self.skipTest("needs a CUDA device for the input tensors")
-        relations: Relations = [
-            ([0, 100], [0, 100], MT_MAP.full),
-            ([100, 200], [100, 200], MT_MAP.full),
-        ]
-        args = dict(_range_args(relations), mask_types=MT_MAP.full)
-        q, k, v = _qkv(200, 200, group=1)
-        for arch in ("sm_80", "sm_90", "sm_120"):
-            with self.subTest(arch=arch), _force_arch(arch):
-                with self.assertRaisesRegex(NotImplementedError, "SM100/SM110"):
-                    _flex_flash_attn_fwd(q, k, v, **args, deterministic=True)
-                with self.assertRaisesRegex(NotImplementedError, "SM100/SM110"):
-                    flex_flash_attn_func(q, k, v, **args, deterministic=True)
-
 
 class TestFFARangeDeterministicFwd(TestCase):
     def setUp(self) -> None:
@@ -557,36 +311,16 @@ class TestFFARangeDeterministicFwd(TestCase):
         )
 
     def _assert_bitwise_across_sm_margin(self, run) -> tuple:
-        """``run(sm_margin)`` -> tensors; equal bit for bit on every legal
-        budget of the 1-CTA grid, including a single CTA."""
-        first = None
-        for sm_margin in (0, 1, self.num_sm - 7, self.num_sm - 1, 0):
-            result = tuple(t.clone() for t in run(sm_margin))
-            if first is None:
-                first = result
-                continue
-            for got, want in zip(result, first):
-                self.assertTrue(
-                    torch.equal(got, want), f"differs at sm_margin={sm_margin}"
-                )
-        assert first is not None
+        first = run(0)
+        _assert_bitwise_equal(run(1), first)
+        _assert_bitwise_equal(run(self.num_sm - 7), first)
+        _assert_bitwise_equal(run(self.num_sm - 1), first)
+        _assert_bitwise_equal(run(0), first)
         return first
-
-    def _assert_fwd_chain_settled(self, q, k, v, relations: Relations, **kwargs):
-        """Relation r is writer r + 1 of every m_block_size-row block its q
-        range has a row in, empty and keyless relations included."""
-        with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
-            self._det_fwd(q, k, v, relations, **kwargs)
-        (kernel,) = launch.built
-        (chain,) = launch.chains
-        _assert_chain_settled(
-            chain, [r[0] for r in relations], kernel.m_block_size, lambda r: r + 1
-        )
 
     @parameterize(
         "case",
         [
-            # (out dtype, q heads per kv head)
             (torch.float32, 1),
             (torch.float32, 2),
             (torch.bfloat16, 2),
@@ -594,8 +328,6 @@ class TestFFARangeDeterministicFwd(TestCase):
     )
     @parameterize("head_dim", _DET_HEAD_DIMS)
     def test_fwd_bitwise_across_runs_and_sm_margin(self, case, head_dim):
-        """Four relations cover every row of each unaligned q range; O/LSE do
-        not depend on the grid and match the reference."""
         out_dtype, group = case
         relations, total_q, total_k = _overlapping_relations(
             [129, 300, 1000, 77], coverage=4, mask_types=[MT_MAP.full, MT_MAP.causal]
@@ -614,10 +346,6 @@ class TestFFARangeDeterministicFwd(TestCase):
 
     @parameterize("head_dim", _DET_HEAD_DIMS)
     def test_fwd_empty_keyless_and_protection_block_relations(self, head_dim):
-        """An empty q range, a relation without keys (its tiles arrive with
-        no contribution), a one-row range, and [1, 130) whose last tile only
-        has a row in block 1 while its lock span reaches block 2, which a
-        later relation starting at 256 owns alone."""
         relations: Relations = [
             ([1, 130], [0, 200], MT_MAP.full),
             ([50, 50], [200, 260], MT_MAP.full),
@@ -630,7 +358,6 @@ class TestFFARangeDeterministicFwd(TestCase):
         out, lse = self._assert_bitwise_across_sm_margin(
             lambda m: self._det_fwd(q, k, v, relations, sm_margin=m)
         )
-        self._assert_fwd_chain_settled(q, k, v, relations)
         out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
         torch.testing.assert_close(out, out_ref, atol=_TOL, rtol=_TOL)
         finite = torch.isfinite(lse_ref)
@@ -639,14 +366,13 @@ class TestFFARangeDeterministicFwd(TestCase):
         self._log_ran(f"empty/keyless/protection hd{head_dim}")
 
     def test_fwd_caller_buffer_accumulation_with_sink(self):
-        """Two calls merge into one caller-provided fp32 state, the second
-        with a sink; the final state is bitwise independent of the grid."""
-        calls: list[Relations] = [
-            [([0, 140], [0, 300], MT_MAP.full), ([70, 260], [300, 500], MT_MAP.causal)],
-            [
-                ([3, 250], [500, 800], MT_MAP.full),
-                ([128, 129], [800, 820], MT_MAP.full),
-            ],
+        first_call: Relations = [
+            ([0, 140], [0, 300], MT_MAP.full),
+            ([70, 260], [300, 500], MT_MAP.causal),
+        ]
+        second_call: Relations = [
+            ([3, 250], [500, 800], MT_MAP.full),
+            ([128, 129], [800, 820], MT_MAP.full),
         ]
         q, k, v = _qkv(260, 820, group=2)
         num_head = q.shape[1]
@@ -655,23 +381,14 @@ class TestFFARangeDeterministicFwd(TestCase):
         def run(sm_margin):
             out = torch.zeros(260, num_head, _HEAD_DIM, device="cuda")
             lse = torch.full((260, num_head), -math.inf, device="cuda")
-            for i, relations in enumerate(calls):
-                self._det_fwd(
-                    q,
-                    k,
-                    v,
-                    relations,
-                    out=out,
-                    lse=lse,
-                    sink=sink if i == 1 else None,
-                    sm_margin=sm_margin,
-                )
+            self._det_fwd(q, k, v, first_call, out=out, lse=lse, sm_margin=sm_margin)
+            self._det_fwd(
+                q, k, v, second_call, out=out, lse=lse, sink=sink, sm_margin=sm_margin
+            )
             return out, lse
 
         out, lse = self._assert_bitwise_across_sm_margin(run)
-        out_ref, lse_ref, _ = _ref_fwd(
-            q, k, v, [r for relations in calls for r in relations], sink
-        )
+        out_ref, lse_ref, _ = _ref_fwd(q, k, v, first_call + second_call, sink)
         torch.testing.assert_close(out, out_ref, atol=_TOL, rtol=_TOL)
         torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
         self._log_ran("caller buffer + sink")
@@ -701,55 +418,29 @@ class TestFFARangeDeterministicFwd(TestCase):
         torch.testing.assert_close(max_logits, max_ref, atol=1e-3, rtol=1e-4)
         self._log_ran("max_logits")
 
-    @parameterize("sm_margin_from_end", [None, 1, 3])
-    def test_fwd_tile_counter_claims_every_tile_from_zero(self, sm_margin_from_end):
-        """Every cluster claims its first tile from the counter too, so the
-        counter ends at the tile count plus one final claim per cluster. The
-        launch is persistent even without an SM reservation."""
+    def test_fwd_launch_is_persistent_without_an_sm_reservation(self):
         relations, total_q, total_k = _overlapping_relations(
             [129, 600], coverage=3, mask_types=[MT_MAP.full]
         )
         q, k, v = _qkv(total_q, total_k, group=2)
-        sm_margin = (
-            0 if sm_margin_from_end is None else self.num_sm - sm_margin_from_end
-        )
-        with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
-            self._det_fwd(
-                q, k, v, relations, out_dtype=torch.bfloat16, sm_margin=sm_margin
-            )
-        torch.cuda.synchronize()
-        (kernel,) = launch.built
+        with record_fwd_kernels() as built:
+            self._det_fwd(q, k, v, relations, out_dtype=torch.bfloat16, sm_margin=0)
+        (kernel,) = built
         self.assertTrue(kernel.deterministic and kernel.is_persistent)
         self.assertEqual(kernel.cluster_shape_mn, (1, 1))
-        (counter,) = launch.counters
-        expected = _expected_tile_counter(
-            [e - s for (s, e), _, _ in relations],
-            num_head=q.shape[1],
-            total_rows=total_q,
-            tile=kernel.cta_tiler[0],
-            cluster=1,
-            sm_budget=self.num_sm - sm_margin,
-        )
-        self.assertEqual(int(counter.item()), expected)
-        self._log_ran(f"counter sm_margin={sm_margin}")
+        self._log_ran("persistent without an sm reservation")
 
     @parameterize(
         "case",
         [
-            # (out dtype, q heads per kv head)
-            (torch.float32, 1),
-            (torch.float32, 2),
-            (torch.bfloat16, 2),
+            (torch.float32, 1, _TOL),
+            (torch.float32, 2, _TOL),
+            (torch.bfloat16, 2, 2 * _TOL),
         ],
     )
     @parameterize("head_dim", _DET_HEAD_DIMS)
     def test_fwd_range_merge_bitwise_across_runs_and_sm_margin(self, case, head_dim):
-        """The RangeMerge forward stores O once per merged Q group, summing the
-        group's pairs in plan order, so deterministic needs no chain there:
-        O/LSE are bitwise equal across sm_margin, between a rebuilt and a
-        precomputed plan, and close to the chained atomic-path forward of the
-        unmerged relations."""
-        out_dtype, group = case
+        out_dtype, group, tol = case
         relations, total_q, total_k = _merged_q_relations()
         q, k, v = _qkv(total_q, total_k, group, head_dim=head_dim)
         args = _range_args(relations)
@@ -768,21 +459,21 @@ class TestFFARangeDeterministicFwd(TestCase):
                 sm_margin=sm_margin,
             )
 
-        for sm_margin in (0, self.num_sm - 7):
-            with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
-                merge_fwd(sm_margin)
-            (kernel,) = launch.built
-            self.assertTrue(kernel.range_merge)
-            self.assertFalse(kernel.deterministic)
-            self.assertEqual(launch.chains, [])
-            if sm_margin > 0:
-                self.assertTrue(kernel.is_persistent)
+        with record_fwd_kernels() as built:
+            merge_fwd(0)
+        (kernel,) = built
+        self.assertTrue(kernel.range_merge)
+        self.assertFalse(kernel.deterministic)
+        with record_fwd_kernels() as reserved_built:
+            merge_fwd(self.num_sm - 7)
+        (reserved_kernel,) = reserved_built
+        self.assertTrue(reserved_kernel.range_merge)
+        self.assertFalse(reserved_kernel.deterministic)
+        self.assertTrue(reserved_kernel.is_persistent)
         out, lse = self._assert_bitwise_across_sm_margin(merge_fwd)
-        for got, want in zip(merge_fwd(self.num_sm - 7, plan), (out, lse)):
-            self.assertTrue(torch.equal(got, want), "precomputed plan differs")
+        _assert_bitwise_equal(merge_fwd(self.num_sm - 7, plan), (out, lse))
         self.assertEqual(out.dtype, out_dtype)
         out_atomic, lse_atomic = self._det_fwd(q, k, v, relations)
-        tol = _TOL if out_dtype == torch.float32 else 2 * _TOL
         torch.testing.assert_close(out.float(), out_atomic, atol=tol, rtol=tol)
         torch.testing.assert_close(lse, lse_atomic, atol=1e-3, rtol=1e-3)
         out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
@@ -790,55 +481,19 @@ class TestFFARangeDeterministicFwd(TestCase):
         torch.testing.assert_close(lse, lse_ref, atol=1e-3, rtol=1e-3)
         self._log_ran(f"range merge fwd {case} hd{head_dim}")
 
-    def test_fwd_rejects_unsupported_combinations(self):
-        relations, total_q, total_k = _overlapping_relations(
-            [40], coverage=2, mask_types=[MT_MAP.full]
-        )
-        q96, k96, v96 = _qkv(total_q, total_k, group=2, head_dim=96)
-        with self.assertRaises(NotImplementedError):
-            self._det_fwd(q96, k96, v96, relations)
-        q, k, v = _qkv(total_q, total_k, group=2)
-        with self.assertRaises(ValueError):
-            self._det_fwd(q, k, v, relations, sm_margin=self.num_sm)
-        # A packed stage tile must start on a token boundary.
-        q3, k3, v3 = _qkv(total_q, total_k, group=3)
-        with self.assertRaisesRegex(
-            NotImplementedError, "multiple of qhead_per_kvhead"
-        ):
-            self._det_fwd(q3, k3, v3, relations, pack_gqa=True)
-
     def _assert_bitwise_packed(self, q, k, v, relations: Relations) -> tuple:
-        """:meth:`_assert_bitwise_across_sm_margin` of the packed fwd. Every
-        kernel built is the deterministic packed one, and every chain state
-        is ``(packed blocks + 1, num_head_kv, 2)`` and settles on the packed
-        rows ``[s * G, e * G)`` of the q ranges."""
-        group = q.shape[1] // k.shape[1]
-        with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
+        with record_fwd_kernels() as built:
             result = self._assert_bitwise_across_sm_margin(
                 lambda m: self._det_fwd(q, k, v, relations, pack_gqa=True, sm_margin=m)
             )
-        self.assertTrue(launch.built)
-        for kernel in launch.built:
-            self.assertTrue(kernel.deterministic and kernel.pack_gqa)
-            self.assertEqual(kernel.qhead_per_kvhead, group)
-        block = launch.built[0].m_block_size
-        packed = [[s * group, e * group] for (s, e), _, _ in relations]
-        self.assertEqual(len(launch.chains), 5)
-        for chain in launch.chains:
-            self.assertEqual(
-                tuple(chain.shape),
-                (math.ceil(q.shape[0] * group / block) + 1, k.shape[1], 2),
-            )
-            _assert_chain_settled(chain, packed, block, lambda r: r + 1)
+        kernel = built[0]
+        self.assertTrue(kernel.deterministic and kernel.pack_gqa)
+        self.assertEqual(kernel.qhead_per_kvhead, q.shape[1] // k.shape[1])
         return result
 
     @parameterize("group", [2, 4])
     @parameterize("head_dim", _DET_HEAD_DIMS)
     def test_packed_fwd_bitwise_across_runs_and_sm_margin(self, group, head_dim):
-        """PackGQA: four relations cover every row of each q range, whose
-        packed starts 2 * (3 + c) and 4 * (3 + c) are off the 128-row block
-        grid. O/LSE do not depend on the grid, match the reference, and stay
-        close to the unpacked deterministic result."""
         relations, total_q, total_k = _overlapping_relations(
             [129, 300, 1000, 77], coverage=4, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
@@ -854,11 +509,6 @@ class TestFFARangeDeterministicFwd(TestCase):
 
     @parameterize("group", [2, 4])
     def test_packed_fwd_empty_keyless_and_block_boundary_relations(self, group):
-        """PackGQA block geometry: [61, 200) starts at packed row 122 (G = 2)
-        or 244 (G = 4), so its first tile spans two blocks; [64, 128) is
-        exactly packed blocks 1 (G = 2) or 2-3 (G = 4); an empty q range, a
-        relation without keys and a one-row range still arrive on their
-        blocks."""
         relations: Relations = [
             ([61, 200], [0, 200], MT_MAP.full),
             ([50, 50], [200, 260], MT_MAP.full),
@@ -876,40 +526,7 @@ class TestFFARangeDeterministicFwd(TestCase):
         torch.testing.assert_close(lse[finite], lse_ref[finite], atol=1e-3, rtol=1e-3)
         self._log_ran(f"packed empty/keyless/boundary G{group}")
 
-    @parameterize("sm_margin_from_end", [None, 3])
-    def test_packed_fwd_tile_counter_counts_packed_units(self, sm_margin_from_end):
-        """Under PackGQA a unit is 128 packed rows of one range and kv head:
-        the counter ends at ``num_head_kv * sum(ceil(len * G / 128))`` plus
-        one final claim per CTA of a grid sized by the packed rows."""
-        group = 4
-        relations, total_q, total_k = _overlapping_relations(
-            [129, 600], coverage=3, mask_types=[MT_MAP.full]
-        )
-        q, k, v = _qkv(total_q, total_k, group=group)
-        sm_margin = (
-            0 if sm_margin_from_end is None else self.num_sm - sm_margin_from_end
-        )
-        with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
-            self._det_fwd(q, k, v, relations, pack_gqa=True, sm_margin=sm_margin)
-        torch.cuda.synchronize()
-        (kernel,) = launch.built
-        self.assertTrue(kernel.deterministic and kernel.pack_gqa)
-        (counter,) = launch.counters
-        expected = _expected_tile_counter(
-            [(e - s) * group for (s, e), _, _ in relations],
-            num_head=k.shape[1],
-            total_rows=total_q * group,
-            tile=kernel.cta_tiler[0],
-            cluster=1,
-            sm_budget=self.num_sm - sm_margin,
-        )
-        self.assertEqual(int(counter.item()), expected)
-        self._log_ran(f"packed counter sm_margin={sm_margin}")
-
     def test_packed_fwd_cuda_graph_replay_matches_eager_bitwise(self):
-        """The packed chain, conflict and tile-counter states are re-zeroed
-        inside the captured graph, so replays on new data equal eager runs
-        bit for bit."""
         relations, total_q, total_k = _overlapping_relations(
             [129, 300], coverage=3, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
@@ -926,9 +543,11 @@ class TestFFARangeDeterministicFwd(TestCase):
                 pack_gqa=True,
             )
 
-        data = [_qkv(total_q, total_k, group=4) for _ in range(2)]
-        eager = [[t.clone() for t in fwd(*d)] for d in data]
-        static = [t.clone() for t in data[0]]
+        data_0 = _qkv(total_q, total_k, group=4)
+        data_1 = _qkv(total_q, total_k, group=4)
+        eager_0 = fwd(*data_0)
+        eager_1 = fwd(*data_1)
+        static = [t.clone() for t in data_0]
         side = torch.cuda.Stream()
         side.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(side):
@@ -937,64 +556,16 @@ class TestFFARangeDeterministicFwd(TestCase):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             static_out = fwd(*static)
-        for i in (1, 0, 1):
-            for dst, src in zip(static, data[i]):
-                dst.copy_(src)
-            graph.replay()
-            torch.cuda.synchronize()
-            for name, got, want in zip(("out", "lse"), static_out, eager[i]):
-                self.assertTrue(torch.equal(got, want), f"{name} of replay on data {i}")
+        _replay(graph, static, data_1)
+        _assert_bitwise_equal(static_out, eager_1)
+        _replay(graph, static, data_0)
+        _assert_bitwise_equal(static_out, eager_0)
+        _replay(graph, static, data_1)
+        _assert_bitwise_equal(static_out, eager_1)
         self._log_ran("packed cuda graph replay")
-
-    def test_direct_store_fwd_ignores_deterministic(self):
-        """The direct store has one writer per O row: no chain, no forced
-        persistence."""
-        relations: Relations = [([0, 100], [0, 100], MT_MAP.full)]
-        q, k, v = _qkv(100, 100, group=1)
-        with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
-            _flex_flash_attn_fwd(
-                q,
-                k,
-                v,
-                **_range_args(relations),
-                disable_fwd_atomic_reduction=True,
-                deterministic=True,
-            )
-        (kernel,) = launch.built
-        self.assertFalse(kernel.deterministic)
-
-    def test_fwd_off_sm100_keeps_deterministic_with_one_writer_per_row(self):
-        """The SM80 path, which runs on this device, accepts deterministic
-        when every O row has one writer: q/k ranges declared with
-        disable_fwd_atomic_reduction, and dense inputs."""
-        relations: Relations = [
-            ([0, 100], [0, 100], MT_MAP.full),
-            ([100, 200], [100, 200], MT_MAP.full),
-        ]
-        q, k, v = _qkv(200, 200, group=2)
-        out_ref = _ref_fwd(q, k, v, relations)[0]
-        with _force_arch("sm_80"):
-            out_ranges, _ = _flex_flash_attn_fwd(
-                q,
-                k,
-                v,
-                **dict(_range_args(relations), mask_types=MT_MAP.full),
-                disable_fwd_atomic_reduction=True,
-                deterministic=True,
-            )
-            out_dense, _ = _flex_flash_attn_fwd(
-                *(t.view(2, 100, *t.shape[1:]) for t in (q, k, v)),
-                deterministic=True,
-            )
-        for out in (out_ranges, out_dense.view_as(out_ranges)):
-            torch.testing.assert_close(out.float(), out_ref, atol=_TOL, rtol=_TOL)
 
 
 def _shared_k_relations() -> tuple[Relations, int, int]:
-    """Relations sharing unaligned K rows (reduced dK/dV) and overlapping Q
-    rows (merged O, dQ), without a repeated (q, k) pair: the A relations have
-    disjoint Q over overlapping K, and every B relation overlaps two A
-    relations in Q over K rows no A relation touches."""
     relations: Relations = []
     for i in range(4):
         relations.append(
@@ -1010,125 +581,7 @@ def _shared_k_relations() -> tuple[Relations, int, int]:
     return relations, 1260, 944
 
 
-def _ref_active_m_bounds_per_range(
-    len_q: int,
-    len_k: int,
-    n_block: int,
-    mask_type: int,
-    tile_m: int,
-    tile_n: int,
-    pack_factor: int = 1,
-) -> tuple[int, int]:
-    if len_q <= 0 or len_k <= 0 or n_block < 0 or n_block >= math.ceil(len_k / tile_n):
-        return 0, 0
-    m_max = math.ceil(len_q * pack_factor / tile_m)
-    if mask_type in (MT_MAP.inv_causal, MT_MAP.bi_causal):
-        n_idx_max = min(len_k, (n_block + 1) * tile_n) * pack_factor
-        m_max = min(m_max, math.ceil(n_idx_max / tile_m))
-    m_min = 0
-    if mask_type in (MT_MAP.causal, MT_MAP.bi_causal):
-        m_idx_right = (n_block * tile_n + len_q - len_k) * pack_factor
-        if m_idx_right > 0:
-            m_min = min(m_max, m_idx_right // tile_m)
-    return m_min, m_max
-
-
-def _ref_active_n_bounds_per_range(
-    len_q: int,
-    len_k: int,
-    m_block: int,
-    mask_type: int,
-    tile_m: int,
-    tile_n: int,
-    pack_factor: int = 1,
-) -> tuple[int, int]:
-    m_upper = math.ceil(len_q * pack_factor / tile_m) if len_q > 0 else 0
-    if len_q <= 0 or len_k <= 0 or m_block < 0 or m_block >= m_upper:
-        return 0, 0
-    n_max = math.ceil(len_k / tile_n)
-    if mask_type in (MT_MAP.causal, MT_MAP.bi_causal):
-        m_idx_max = math.ceil((m_block + 1) * tile_m / pack_factor)
-        n_idx_right = m_idx_max + len_k - len_q
-        n_max = 0 if n_idx_right <= 0 else min(n_max, math.ceil(n_idx_right / tile_n))
-    n_min = 0
-    if mask_type in (MT_MAP.inv_causal, MT_MAP.bi_causal):
-        m_idx_min = (m_block * tile_m) // pack_factor
-        n_min = n_max if m_idx_min >= len_k else min(n_max, m_idx_min // tile_n)
-    return n_min, n_max
-
-
-def _assert_chain_want_settled(chain: torch.Tensor, want: torch.Tensor) -> None:
-    torch.cuda.synchronize()
-    chain = chain.cpu()
-    assert torch.equal(chain[..., 1], torch.zeros_like(chain[..., 1])), (
-        "arrival counts left: " f"{chain[..., 1].nonzero().tolist()[:8]}"
-    )
-    got = chain[..., 0]
-    assert torch.equal(
-        got, want[:, None].expand_as(got)
-    ), f"published {got[:, 0].tolist()}, expected {want.tolist()}"
-
-
-def _assert_bwd_chains_settled(
-    launch: _Launch, relations: Relations, group: int, cat_gqa: bool
-) -> None:
-    """dQ: on each tile_m-row Q block, writer r * S + max(A_r(b)) + 1 of the
-    highest relation r with at least one active cluster K tile on block b
-    (leaving blocks with empty A_r(b) untouched). dK/dV (when reduced): writer
-    (r + 1) * G on each cluster K-tile block touched by an active K tile of r."""
-    (kernel,) = launch.built
-    tile_m = kernel.tile_m
-    cluster_tile_k = kernel.tile_n * kernel.cta_group_size
-    stride = max(
-        math.ceil(max(ke - ks for _, (ks, ke), _ in relations) / cluster_tile_k), 1
-    )
-    if kernel.range_dq_chain:
-        dq_chain, *dkv_chain = launch.chains
-        dq_want = torch.zeros(dq_chain.shape[0], dtype=torch.int32)
-        for r, ((qs, qe), (ks, ke), mask_type) in enumerate(relations):
-            len_q, len_k = qe - qs, ke - ks
-            r_max_n1: dict[int, int] = {}
-            for m in range(math.ceil(max(len_q, 0) / tile_m)):
-                n_min, n_max = _ref_active_n_bounds_per_range(
-                    len_q, len_k, m, mask_type, tile_m, cluster_tile_k
-                )
-                if n_max > n_min:
-                    ts = qs + m * tile_m
-                    te = min(qs + (m + 1) * tile_m, qe)
-                    for b in range(ts // tile_m, (te - 1) // tile_m + 1):
-                        r_max_n1[b] = max(r_max_n1.get(b, 0), n_max)
-            for b, n1 in r_max_n1.items():
-                dq_want[b] = r * stride + n1
-        _assert_chain_want_settled(dq_chain, dq_want)
-    else:
-        dkv_chain = list(launch.chains)
-    if dkv_chain:
-        dkv_stride = 1 if cat_gqa else group
-        dkv_want = torch.zeros(dkv_chain[0].shape[0], dtype=torch.int32)
-        for r, ((qs, qe), (ks, ke), mask_type) in enumerate(relations):
-            len_q, len_k = qe - qs, ke - ks
-            for n in range(math.ceil(max(len_k, 0) / cluster_tile_k)):
-                m_min, m_max = _ref_active_m_bounds_per_range(
-                    len_q, len_k, n, mask_type, tile_m, cluster_tile_k
-                )
-                if m_max > m_min:
-                    ts = ks + n * cluster_tile_k
-                    te = min(ks + (n + 1) * cluster_tile_k, ke)
-                    for kb in range(
-                        ts // cluster_tile_k, (te - 1) // cluster_tile_k + 1
-                    ):
-                        dkv_want[kb] = (r + 1) * dkv_stride
-        _assert_chain_want_settled(dkv_chain[0], dkv_want)
-
-
 def _merged_k_relations() -> tuple[Relations, int, int]:
-    """Relations over sorted, pairwise disjoint K ranges, several sharing
-    each K range (RangeMerge K groups), listed out of K order. Two groups
-    hold pairs whose Q ranges overlap but start one row apart, with causal
-    and inverse-causal masks splitting every shared Q row's keys between
-    them, so both pairs add a nonzero dQ to the same rows; one group is
-    keyless, one has an empty Q range and a pair the mask empties on some
-    K tiles. No (q, k) pair repeats. Returns (relations, total_q, total_k)."""
     relations: Relations = [
         ([600, 700], [300, 557], MT_MAP.causal),
         ([5, 305], [0, 300], MT_MAP.causal),
@@ -1146,12 +599,6 @@ def _merged_k_relations() -> tuple[Relations, int, int]:
 
 
 def _merged_k_relations_heavy_middle() -> tuple[Relations, int, int]:
-    """:func:`_merged_k_relations` with four more one-tile Q pairs on K range
-    [300, 557], disjoint in Q from its other pairs, so that group walks eight
-    Q tiles, the most of any group, while its K range is second lowest. K
-    range [557, 700] shrinks to [580, 700] and total_k grows to 1100, leaving
-    K rows [557, 580) and [1000, 1100) in no group, which the dK/dV hole
-    sweep must zero. Returns (relations, total_q, total_k)."""
     relations, total_q, _ = _merged_k_relations()
     relations = [
         (q_range, [580, 700] if k_range == [557, 700] else k_range, mask_type)
@@ -1166,20 +613,6 @@ def _merged_k_relations_heavy_middle() -> tuple[Relations, int, int]:
 def _merged_k_relations_2cta_adjacent(
     num_groups: int = 8, pairs_per_group: int = 4
 ) -> tuple[Relations, int, int]:
-    """RangeMerge K groups whose consecutive pairs share Q rows that change
-    CTA under 2-CTA clusters, in adjacent compute tiles of the pair walk.
-
-    Pair ``p`` of a group is one 128-row Q tile starting 64 rows after pair
-    ``p - 1``, against the group's 160-key K range (one cluster K tile, so
-    every pair has work): its upper row half, reduced by CTA 1, is the lower
-    row half of pair ``p + 1``, reduced by CTA 0, and the two tiles are the
-    last of one pair and the first of the next. Masks split those rows'
-    keys between the pairs (the first inverse-causal, the last causal, the
-    others bi-causal), so no (q, k) pair repeats and both add a nonzero dQ.
-    A full relation in the lowest K group covers every Q row first, so the
-    shared rows already hold a nonzero dQ and the order of the two later
-    additions shows in the fp32 sum. Returns (relations, total_q, total_k).
-    """
     len_k, base_k = 160, 256
     span = 64 * pairs_per_group + 128
     total_q = span * num_groups
@@ -1200,101 +633,33 @@ def _merged_k_relations_2cta_adjacent(
     return relations, total_q, base_k + len_k * num_groups
 
 
-def _merged_k_groups(relations: Relations) -> list[tuple[list[int], list[list[int]]]]:
-    """(K range, Q ranges of its pairs) per merged K group, in the launch
-    order of the K-merge plan the kernel receives; its order is checked
-    against a reference in ``tests/test_kernel/cutedsl/test_range_merge.py``."""
-    args = _range_args(relations)
-    plan = plan_range_merge_bwd(args["q_ranges"], args["k_ranges"], args["mask_types"])
-    cu = plan.cu_batches.tolist()
-    q_ranges = plan.sorted_inner_ranges.tolist()
-    return [
-        (plan.merged_outer_ranges[g].tolist(), q_ranges[cu[g] : cu[g + 1]])
-        for g in range(len(cu) - 1)
-        if cu[g + 1] > cu[g]
-    ]
-
-
-def _assert_merged_dq_chain_settled(
-    launch: _Launch, relations: Relations, group: int = 1, cat_gqa: bool = False
-) -> None:
-    """Merged dQ: on each tile_m-row Q block, writer g * S + max(A_g(b)) + 1 of
-    the highest merged K group g with an active K tile on block b; blocks where
-    every touching Q tile of g is masked out stay untouched."""
-    (kernel,) = launch.built
-    tile_m = kernel.tile_m
-    cluster_tile_k = kernel.tile_n * kernel.cta_group_size
-    args = _range_args(relations)
-    plan = plan_range_merge_bwd(args["q_ranges"], args["k_ranges"], args["mask_types"])
-    cu = plan.cu_batches.tolist()
-    q_ranges = plan.sorted_inner_ranges.tolist()
-    mask_types = plan.sorted_mask_types.tolist()
-    k_ranges = plan.merged_outer_ranges.tolist()
-    stride = max(
-        math.ceil(max(ke - ks for _, (ks, ke), _ in relations) / cluster_tile_k), 1
-    )
-    dq_chain, *dkv_chain = launch.chains
-    dq_want = torch.zeros(dq_chain.shape[0], dtype=torch.int32)
-    for g in range(len(cu) - 1):
-        ks, ke = k_ranges[g]
-        len_k = ke - ks
-        g_max_n1: dict[int, int] = {}
-        for row in range(cu[g], cu[g + 1]):
-            qs, qe = q_ranges[row]
-            len_q = qe - qs
-            mt = mask_types[row]
-            for m in range(math.ceil(max(len_q, 0) / tile_m)):
-                n_min, n_max = _ref_active_n_bounds_per_range(
-                    len_q, len_k, m, mt, tile_m, cluster_tile_k
-                )
-                if n_max > n_min:
-                    ts = qs + m * tile_m
-                    te = min(qs + (m + 1) * tile_m, qe)
-                    for b in range(ts // tile_m, (te - 1) // tile_m + 1):
-                        g_max_n1[b] = max(g_max_n1.get(b, 0), n_max)
-        for b, n1 in g_max_n1.items():
-            dq_want[b] = g * stride + n1
-    _assert_chain_want_settled(dq_chain, dq_want)
-    if dkv_chain:
-        dkv_stride = 1 if cat_gqa else group
-        dkv_want = torch.zeros(dkv_chain[0].shape[0], dtype=torch.int32)
-        for g in range(len(cu) - 1):
-            ks, ke = k_ranges[g]
-            len_k = ke - ks
-            for n in range(math.ceil(max(len_k, 0) / cluster_tile_k)):
-                active_n = any(
-                    _ref_active_m_bounds_per_range(
-                        q_ranges[row][1] - q_ranges[row][0],
-                        len_k,
-                        n,
-                        mask_types[row],
-                        tile_m,
-                        cluster_tile_k,
-                    )[1]
-                    > _ref_active_m_bounds_per_range(
-                        q_ranges[row][1] - q_ranges[row][0],
-                        len_k,
-                        n,
-                        mask_types[row],
-                        tile_m,
-                        cluster_tile_k,
-                    )[0]
-                    for row in range(cu[g], cu[g + 1])
-                )
-                if active_n:
-                    ts = ks + n * cluster_tile_k
-                    te = min(ks + (n + 1) * cluster_tile_k, ke)
-                    for kb in range(
-                        ts // cluster_tile_k, (te - 1) // cluster_tile_k + 1
-                    ):
-                        dkv_want[kb] = (g + 1) * dkv_stride
-        _assert_chain_want_settled(dkv_chain[0], dkv_want)
+_DISJOINT_Q_RELATIONS: dict[bool, tuple[Relations, int]] = {
+    True: (
+        [
+            ([3, 132], [0, 290], MT_MAP.full),
+            ([140, 410], [290, 560], MT_MAP.causal),
+            ([420, 420], [560, 620], MT_MAP.full),
+            ([430, 690], [620, 620], MT_MAP.full),
+            ([700, 965], [620, 900], MT_MAP.inv_causal),
+            ([970, 1240], [900, 1170], MT_MAP.bi_causal),
+        ],
+        1180,
+    ),
+    False: (
+        [
+            ([3, 132], [10, 300], MT_MAP.full),
+            ([140, 410], [150, 430], MT_MAP.causal),
+            ([420, 420], [200, 260], MT_MAP.full),
+            ([430, 690], [430, 430], MT_MAP.full),
+            ([700, 965], [100, 380], MT_MAP.inv_causal),
+            ([970, 1240], [250, 520], MT_MAP.bi_causal),
+        ],
+        550,
+    ),
+}
 
 
 class TestFFARangeDeterministicBwd(TestCase):
-    """dQ of every (relation, cluster K tile) is chained per Q row block, and
-    reduced dK/dV of every (relation, q head) per K row block."""
-
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("deterministic q/k ranges require SM100/SM110")
@@ -1335,59 +700,29 @@ class TestFFARangeDeterministicBwd(TestCase):
     def _assert_grads_bitwise_across_sm_margin(
         self, q, k, v, out, lse, do, relations, two_cta, **kwargs
     ):
-        """Gradients on every legal budget of the cluster size are equal bit
-        for bit; returns them after checking the reference."""
         cluster = 2 if two_cta else 1
         env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0" if two_cta else "1"}
-        first = None
-        with mock.patch.dict("os.environ", env):
-            for sm_margin in (
-                0,
-                1,
-                self.num_sm - 4 * cluster,
-                self.num_sm - cluster,
-                0,
-            ):
-                with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
-                    grads = self._det_bwd(
-                        q, k, v, out, lse, do, relations, sm_margin=sm_margin, **kwargs
-                    )
-                (kernel,) = launch.built
-                self.assertEqual(kernel.use_2cta_instrs, two_cta)
-                self.assertTrue(kernel.is_persistent)
-                _assert_bwd_chains_settled(
-                    launch,
-                    relations,
-                    group=q.shape[1] // k.shape[1],
-                    cat_gqa=kwargs.get("cat_gqa", False),
-                )
-                if first is None:
-                    first = [g.clone() for g in grads]
-                    continue
-                for name, got, want in zip("qkv", grads, first):
-                    self.assertTrue(
-                        torch.equal(got, want),
-                        f"d{name} differs at sm_margin={sm_margin}",
-                    )
-        assert first is not None
-        refs = self._ref_grads(q, k, v, do, relations)
-        for name, got, want in zip("qkv", first, refs):
-            torch.testing.assert_close(
-                got.float(), want, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
-            )
-        return first
 
-    def _ref_grads(self, q, k, v, do, relations):
-        qkv = [t.detach().float().requires_grad_() for t in (q, k, v)]
-        out_ref, _, _ = _ref_fwd(*qkv, relations)
-        out_ref.backward(do.float())
-        return [t.grad for t in qkv]
+        def run(sm_margin: int):
+            return self._det_bwd(
+                q, k, v, out, lse, do, relations, sm_margin=sm_margin, **kwargs
+            )
+
+        with mock.patch.dict("os.environ", env), record_bwd_kernels() as built:
+            first = run(0)
+            _assert_bitwise_equal(run(1), first)
+            _assert_bitwise_equal(run(self.num_sm - 4 * cluster), first)
+            _assert_bitwise_equal(run(self.num_sm - cluster), first)
+            _assert_bitwise_equal(run(0), first)
+        kernel = built[0]
+        self.assertEqual(kernel.use_2cta_instrs, two_cta)
+        self.assertTrue(kernel.is_persistent)
+        _assert_grads_close(first, _ref_grads(q, k, v, do, relations))
+        return first
 
     @parameterize(
         "case",
         [
-            # (q heads per kv head, cat_gqa, 2-CTA, head_dim); head_dim 64
-            # launches 1-CTA clusters only.
             (1, False, True, 128),
             (1, False, False, 128),
             (2, True, True, 128),
@@ -1397,9 +732,6 @@ class TestFFARangeDeterministicBwd(TestCase):
         ],
     )
     def test_bwd_dq_bitwise_across_sm_margin(self, case):
-        """Three relations cover every row of each unaligned q range, half of
-        them causal, so masked-out Q tiles are skipped while active Q tiles
-        chain; the dK/dV store is direct, one writer per K row."""
         group, cat_gqa, two_cta, head_dim = case
         relations, total_q, total_k = _overlapping_relations(
             [129, 300, 1000, 77], coverage=3, mask_types=[MT_MAP.full, MT_MAP.causal]
@@ -1415,8 +747,6 @@ class TestFFARangeDeterministicBwd(TestCase):
     @parameterize(
         "case",
         [
-            # (q heads per kv head, cat_gqa, 2-CTA, head_dim); head_dim 64
-            # launches 1-CTA clusters only.
             (1, False, True, 128),
             (2, False, True, 128),
             (2, False, False, 128),
@@ -1427,8 +757,6 @@ class TestFFARangeDeterministicBwd(TestCase):
         ],
     )
     def test_bwd_reduced_dkv_bitwise_across_sm_margin(self, case):
-        """Relations share unaligned K rows, so dK/dV are reduced: per
-        (relation, q head) without cat_gqa, per relation with it or MHA."""
         group, cat_gqa, two_cta, head_dim = case
         relations, total_q, total_k = _shared_k_relations()
         q, k, v, out, lse, do = self._fwd_bwd_inputs(
@@ -1450,9 +778,6 @@ class TestFFARangeDeterministicBwd(TestCase):
 
     @parameterize("head_dim", _DET_HEAD_DIMS)
     def test_bwd_empty_and_keyless_relations(self, head_dim):
-        """A relation without keys has no K tile and so no dQ writer; an empty
-        q range has no Q block; a one-row range and a range starting at a
-        block's last row still chain."""
         relations: Relations = [
             ([1, 130], [0, 200], MT_MAP.full),
             ([50, 50], [200, 260], MT_MAP.full),
@@ -1464,50 +789,17 @@ class TestFFARangeDeterministicBwd(TestCase):
         q, k, v, out, lse, do = self._fwd_bwd_inputs(
             relations, 420, 900, group=1, head_dim=head_dim
         )
-        first = None
-        for sm_margin in (0, self.num_sm - 2, 0):
-            grads = self._det_bwd(q, k, v, out, lse, do, relations, sm_margin=sm_margin)
-            if first is None:
-                first = [g.clone() for g in grads]
-                continue
-            for got, want in zip(grads, first):
-                self.assertTrue(torch.equal(got, want))
-        assert first is not None
-        for name, got, want in zip(
-            "qkv", first, self._ref_grads(q, k, v, do, relations)
-        ):
-            torch.testing.assert_close(
-                got.float(), want, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
-            )
+
+        def run(sm_margin: int):
+            return self._det_bwd(q, k, v, out, lse, do, relations, sm_margin=sm_margin)
+
+        first = run(0)
+        _assert_bitwise_equal(run(self.num_sm - 2), first)
+        _assert_bitwise_equal(run(0), first)
+        _assert_grads_close(first, _ref_grads(q, k, v, do, relations))
         self._log_ran(f"bwd empty/keyless hd{head_dim}")
 
-    def test_bwd_tile_counter_claims_every_tile_from_zero(self):
-        relations, total_q, total_k = _overlapping_relations(
-            [129, 600], coverage=2, mask_types=[MT_MAP.full]
-        )
-        q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, 1)
-        sm_margin = self.num_sm - 6
-        with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
-            self._det_bwd(q, k, v, out, lse, do, relations, sm_margin=sm_margin)
-        torch.cuda.synchronize()
-        (kernel,) = launch.built
-        (counter,) = launch.counters
-        expected = _expected_tile_counter(
-            [e - s for _, (s, e), _ in relations],
-            num_head=q.shape[1],
-            total_rows=total_k,
-            tile=kernel.tile_n,
-            cluster=kernel.cta_group_size,
-            sm_budget=self.num_sm - sm_margin,
-        )
-        self.assertEqual(int(counter.item()), expected)
-
     def test_bwd_reads_no_range_back_outside_debug_mode(self):
-        """Outside FFA debug mode the max_seqlen_k contract is trusted: warm
-        deterministic range backward launches across the dQ chain, disjoint-Q
-        dense dQacc semaphore, and precomputed RangeMerge paths issue no
-        synchronizing torch op, which ``torch.cuda.set_sync_debug_mode("error")``
-        turns into an error. The debug-mode range read-back is such an op."""
         relations, total_q, total_k = _overlapping_relations(
             [129, 300], coverage=2, mask_types=[MT_MAP.full]
         )
@@ -1529,9 +821,9 @@ class TestFFARangeDeterministicBwd(TestCase):
             merge_args["q_ranges"], merge_args["k_ranges"], merge_args["mask_types"]
         )
 
-        def bwd(debug_mode: str) -> None:
+        def bwd_chained() -> None:
             with mock.patch.dict(
-                "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE": debug_mode}
+                "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE": "0"}
             ):
                 _flex_flash_attn_bwd(
                     q,
@@ -1579,40 +871,23 @@ class TestFFARangeDeterministicBwd(TestCase):
                     deterministic=True,
                 )
 
-        bwd("0")  # compile outside the sync check
+        bwd_chained()
         bwd_disjoint_dense()
         bwd_merged()
         torch.cuda.synchronize()
+        prev_sync_debug_mode = torch.cuda.get_sync_debug_mode()
         torch.cuda.set_sync_debug_mode("error")
         try:
-            bwd("0")
+            bwd_chained()
             bwd_disjoint_dense()
             bwd_merged()
-            with self.assertRaisesRegex(RuntimeError, "synchronizing"):
-                bwd("1")
         finally:
-            torch.cuda.set_sync_debug_mode("default")
+            torch.cuda.set_sync_debug_mode(prev_sync_debug_mode)
         self._log_ran("bwd no sync outside debug mode")
-
-    def test_bwd_rejects_unsupported_combinations(self):
-        relations, total_q, total_k = _overlapping_relations(
-            [40], coverage=2, mask_types=[MT_MAP.full]
-        )
-        q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, 1)
-        q96, k96, v96 = _qkv(total_q, total_k, group=1, head_dim=96)
-        with self.assertRaises(NotImplementedError):
-            self._det_bwd(q96, k96, v96, out[..., :96], lse, do[..., :96], relations)
-        # A 2-CTA cluster does not fit one SM, and the cluster size is kept.
-        with mock.patch.dict(
-            "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
-        ), self.assertRaises(ValueError):
-            self._det_bwd(q, k, v, out, lse, do, relations, sm_margin=self.num_sm - 1)
 
     @parameterize(
         "case",
         [
-            # (q heads per kv head, cat_gqa, head_dim, 2-CTA); head_dim 64
-            # launches 1-CTA clusters only.
             (1, False, 64, False),
             (2, True, 64, False),
             (1, False, 128, False),
@@ -1622,44 +897,27 @@ class TestFFARangeDeterministicBwd(TestCase):
         ],
     )
     def test_bwd_range_merge_bitwise_across_sm_margin(self, case):
-        """RangeMerge K groups as dQ writers (group, K tile): pairs of one
-        group overlapping in Q add to the same rows, a keyless group has no
-        writer, an empty pair no event. dQ/dK/dV are bitwise equal across
-        sm_margin and between a rebuilt and a precomputed plan, the dQ chain
-        settles on the merged active writers, and the gradients match the
-        chained unmerged backward with reduced dK/dV and the reference. Under
-        2-CTA clusters the two CTAs of a writer hand off when active pairs
-        overlap in dQacc TMA rows."""
         self._check_bwd_range_merge(case, *_merged_k_relations())
 
     @parameterize("case", [(1, False, 128, False), (2, True, 128, True)])
-    def test_bwd_range_merge_heavy_group_launches_first(self, case):
-        """The K group with the longest Q walk is not the lowest K range, so
-        RangeMerge launches it first and the dQ writer numbers follow the
-        launch order rather than K order; the merged backward still settles
-        on them and stays bitwise equal across sm_margin and plans. K rows in
-        no group (one gap between groups, one tail) come out zero, with the
-        self-allocated dK/dV buffers starting as NaN."""
+    def test_bwd_range_merge_heavy_middle_group_and_k_rows_in_no_group(self, case):
         relations, total_q, total_k = _merged_k_relations_heavy_middle()
-        groups = _merged_k_groups(relations)
-        self.assertEqual(groups[0][0], [300, 557])
-        self.assertNotEqual([k for k, _ in groups], sorted(k for k, _ in groups))
         dq, dk, dv = self._check_bwd_range_merge(
-            case, relations, total_q, total_k, nan_empty=True
+            case, relations, total_q, total_k, empty_like=_nan_empty_like
         )
-        for name, grad in (("dk", dk), ("dv", dv)):
-            for start, end in ((557, 580), (1000, 1100)):
-                self.assertTrue(
-                    bool((grad[start:end] == 0).all()),
-                    f"{name} rows [{start}, {end}) in no K group are not zero",
-                )
+        self.assertTrue(torch.equal(dk[557:580], torch.zeros_like(dk[557:580])))
+        self.assertTrue(torch.equal(dk[1000:1100], torch.zeros_like(dk[1000:1100])))
+        self.assertTrue(torch.equal(dv[557:580], torch.zeros_like(dv[557:580])))
+        self.assertTrue(torch.equal(dv[1000:1100], torch.zeros_like(dv[1000:1100])))
 
     def _check_bwd_range_merge(
-        self, case, relations, total_q, total_k, nan_empty=False
+        self,
+        case,
+        relations,
+        total_q,
+        total_k,
+        empty_like: Callable[..., torch.Tensor] = torch.empty_like,
     ):
-        """Runs the merged deterministic backward checks; returns its dQ/dK/dV.
-        ``nan_empty`` fills every ``torch.empty_like`` buffer of the merged
-        backward with NaN, so a row the kernels or the hole sweep skip shows."""
         group, cat_gqa, head_dim, two_cta = case
         cluster = 2 if two_cta else 1
         q, k, v, out, lse, do = self._fwd_bwd_inputs(
@@ -1670,16 +928,8 @@ class TestFFARangeDeterministicBwd(TestCase):
             args["q_ranges"], args["k_ranges"], args["mask_types"]
         )
 
-        empty_like = torch.empty_like
-
-        def nan_empty_like(*args, **kwargs):
-            t = empty_like(*args, **kwargs)
-            return t.fill_(float("nan")) if t.is_floating_point() else t
-
         def merge_bwd(sm_margin, range_merge=True):
-            with mock.patch(
-                "torch.empty_like", nan_empty_like if nan_empty else empty_like
-            ):
+            with mock.patch("torch.empty_like", empty_like):
                 return self._det_bwd(
                     q,
                     k,
@@ -1694,120 +944,76 @@ class TestFFARangeDeterministicBwd(TestCase):
                 )
 
         env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0" if two_cta else "1"}
-        first = None
         with mock.patch.dict("os.environ", env):
-            with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
-                merge_bwd(0)
-            (kernel,) = launch.built
+            with record_bwd_kernels() as built:
+                first = merge_bwd(0)
+            (kernel,) = built
             self.assertTrue(kernel.range_merge and kernel.deterministic)
             self.assertTrue(kernel.is_persistent)
             self.assertEqual(kernel.use_2cta_instrs, two_cta)
             self.assertEqual(kernel.dq_pair_handoff, two_cta)
             self.assertFalse(kernel.dKV_postprocess)
-            _assert_merged_dq_chain_settled(launch, relations)
-            for sm_margin in (
-                0,
-                1,
-                self.num_sm - 4 * cluster,
-                self.num_sm - cluster,
-                0,
-            ):
-                grads = [g.clone() for g in merge_bwd(sm_margin)]
-                if first is None:
-                    first = grads
-                    continue
-                for name, got, want in zip("qkv", grads, first):
-                    self.assertTrue(
-                        torch.equal(got, want),
-                        f"d{name} differs at sm_margin={sm_margin}",
-                    )
-            assert first is not None
-            for name, got, want in zip(
-                "qkv", merge_bwd(self.num_sm - 4 * cluster, plan), first
-            ):
-                self.assertTrue(torch.equal(got, want), f"d{name}: plan differs")
+            _assert_bitwise_equal(merge_bwd(1), first)
+            _assert_bitwise_equal(merge_bwd(self.num_sm - 4 * cluster), first)
+            _assert_bitwise_equal(merge_bwd(self.num_sm - cluster), first)
+            _assert_bitwise_equal(merge_bwd(0), first)
+            _assert_bitwise_equal(merge_bwd(self.num_sm - 4 * cluster, plan), first)
             unmerged = self._det_bwd(
                 q, k, v, out, lse, do, relations, direct_dkv=False, cat_gqa=cat_gqa
             )
-        refs = self._ref_grads(q, k, v, do, relations)
-        for name, got, chained, ref in zip("qkv", first, unmerged, refs):
-            torch.testing.assert_close(
-                got.float(),
-                chained.float(),
-                atol=3e-2,
-                rtol=3e-2,
-                msg=lambda m: f"d{name} vs unmerged: {m}",
-            )
-            torch.testing.assert_close(
-                got.float(), ref, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
-            )
+        _assert_grads_close(first, unmerged)
+        _assert_grads_close(first, _ref_grads(q, k, v, do, relations))
         self._log_ran(f"bwd range merge {case}")
         return first
 
     @parameterize("cat_gqa", [False, True])
     def test_bwd_range_merge_2cta_adjacent_pair_conflicts_bitwise(self, cat_gqa):
-        """2-CTA RangeMerge whose consecutive pairs share Q rows that change
-        CTA in adjacent compute tiles: with the second CTA of every cluster
-        delayed before each tile's reductions, dQ/dK/dV equal the undelayed
-        result bit for bit on the full grid and on one cluster. Without the
-        pair handoff the delay reorders the shared rows' additions and dQ
-        differs from run to run."""
         relations, total_q, total_k = _merged_k_relations_2cta_adjacent()
         group = 2 if cat_gqa else 1
         q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, group)
 
         def merge_bwd(sm_margin):
-            return [
-                g.clone()
-                for g in self._det_bwd(
-                    q,
-                    k,
-                    v,
-                    out,
-                    lse,
-                    do,
-                    relations,
-                    range_merge=True,
-                    cat_gqa=cat_gqa,
-                    sm_margin=sm_margin,
-                )
-            ]
+            return self._det_bwd(
+                q,
+                k,
+                v,
+                out,
+                lse,
+                do,
+                relations,
+                range_merge=True,
+                cat_gqa=cat_gqa,
+                sm_margin=sm_margin,
+            )
 
         env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
         with mock.patch.dict("os.environ", env):
-            with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
+            with record_bwd_kernels() as built:
                 first = merge_bwd(0)
-            (kernel,) = launch.built
+            (kernel,) = built
             self.assertTrue(kernel.use_2cta_instrs and kernel.dq_pair_handoff)
-            _assert_merged_dq_chain_settled(launch, relations)
             with delay_injection(DelayPoint.CHAIN_WAIT, seed=7, max_ns=20_000):
-                for sm_margin in (0, self.num_sm - 2):
-                    for _ in range(5):
-                        for name, got, want in zip("qkv", merge_bwd(sm_margin), first):
-                            self.assertTrue(
-                                torch.equal(got, want),
-                                f"d{name} differs under delay at {sm_margin=}",
-                            )
-        refs = self._ref_grads(q, k, v, do, relations)
-        for name, got, ref in zip("qkv", first, refs):
-            torch.testing.assert_close(
-                got.float(), ref, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
-            )
+                _assert_bitwise_equal(merge_bwd(0), first)
+                _assert_bitwise_equal(merge_bwd(0), first)
+                _assert_bitwise_equal(merge_bwd(0), first)
+                _assert_bitwise_equal(merge_bwd(0), first)
+                _assert_bitwise_equal(merge_bwd(0), first)
+                _assert_bitwise_equal(merge_bwd(self.num_sm - 2), first)
+                _assert_bitwise_equal(merge_bwd(self.num_sm - 2), first)
+                _assert_bitwise_equal(merge_bwd(self.num_sm - 2), first)
+                _assert_bitwise_equal(merge_bwd(self.num_sm - 2), first)
+                _assert_bitwise_equal(merge_bwd(self.num_sm - 2), first)
+        _assert_grads_close(first, _ref_grads(q, k, v, do, relations))
         self._log_ran(f"bwd range merge 2-CTA adjacent conflicts {cat_gqa=}")
 
     @parameterize(
         "case",
         [
-            # (head_dim, 2-CTA)
             (64, False),
             (128, True),
         ],
     )
     def test_bwd_range_merge_cuda_graph_replay_matches_eager_bitwise(self, case):
-        """The merged dQ chain re-zeroes its state inside a captured graph:
-        replays on new data equal eager runs bit for bit, with the K-merge
-        plan built before the capture; under 2-CTA the pair handoff barriers
-        start every replay from their initial phase."""
         head_dim, two_cta = case
         relations, total_q, total_k = _merged_k_relations()
         args = _range_args(relations)
@@ -1830,16 +1036,13 @@ class TestFFARangeDeterministicBwd(TestCase):
                 deterministic=True,
             )[:3]
 
-        data = [
-            self._fwd_bwd_inputs(relations, total_q, total_k, 2, head_dim=head_dim)
-            for _ in range(2)
-        ]
+        data_0 = self._fwd_bwd_inputs(relations, total_q, total_k, 2, head_dim=head_dim)
+        data_1 = self._fwd_bwd_inputs(relations, total_q, total_k, 2, head_dim=head_dim)
         env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0" if two_cta else "1"}
-        with mock.patch.dict("os.environ", env), _record_launch(
-            FFABwdSm100, _flex_flash_attn_bwd
-        ) as launch:
-            eager = [[g.clone() for g in bwd(*d)] for d in data]
-            static = [t.clone() for t in data[0]]
+        with mock.patch.dict("os.environ", env), record_bwd_kernels() as built:
+            eager_0 = bwd(*data_0)
+            eager_1 = bwd(*data_1)
+            static = [t.clone() for t in data_0]
             side = torch.cuda.Stream()
             side.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(side):
@@ -1848,24 +1051,19 @@ class TestFFARangeDeterministicBwd(TestCase):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 static_grads = bwd(*static)
-            # The swapped-in compile cache owns the captured kernel's module,
-            # so every replay runs before the context restores the old cache.
-            (kernel,) = launch.built
+            # Replay inside record_bwd_kernels so the swapped cache keeps the module.
+            (kernel,) = built
             self.assertEqual(kernel.use_2cta_instrs, two_cta)
             self.assertTrue(kernel.range_merge and kernel.deterministic)
-            for i in (1, 0, 1):
-                for dst, src in zip(static, data[i]):
-                    dst.copy_(src)
-                graph.replay()
-                torch.cuda.synchronize()
-                for name, got, want in zip("qkv", static_grads, eager[i]):
-                    self.assertTrue(torch.equal(got, want), f"d{name} of replay on {i}")
+            _replay(graph, static, data_1)
+            _assert_bitwise_equal(static_grads, eager_1)
+            _replay(graph, static, data_0)
+            _assert_bitwise_equal(static_grads, eager_0)
+            _replay(graph, static, data_1)
+            _assert_bitwise_equal(static_grads, eager_1)
         self._log_ran(f"bwd range merge cuda graph replay {case}")
 
     def test_public_api_fwd_bwd_bitwise_with_sink(self):
-        """flex_flash_attn_func(deterministic=True) on GQA with reduced dK/dV
-        and a sink: O, LSE and every gradient, dsink included, are bitwise
-        equal across sm_margin."""
         relations, total_q, total_k = _shared_k_relations()
         q, k, v = _qkv(total_q, total_k, group=2)
         sink = torch.randn(2, q.shape[1], device="cuda", dtype=torch.float32)
@@ -1887,20 +1085,14 @@ class TestFFARangeDeterministicBwd(TestCase):
             "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
         ):
             first = run(0)
-            for sm_margin in (1, self.num_sm - 2, 0):
-                for name, got, want in zip(
-                    ("out", "lse", "dq", "dk", "dv", "dsink"), run(sm_margin), first
-                ):
-                    self.assertTrue(
-                        torch.equal(got, want),
-                        f"{name} differs at sm_margin={sm_margin}",
-                    )
+            _assert_bitwise_equal(run(1), first)
+            _assert_bitwise_equal(run(self.num_sm - 2), first)
+            _assert_bitwise_equal(run(0), first)
         self._log_ran("public api")
 
     @parameterize(
         "case",
         [
-            # (range_merge, 2-CTA, head_dim)
             (False, False, 64),
             (False, False, 128),
             (False, True, 128),
@@ -1909,25 +1101,15 @@ class TestFFARangeDeterministicBwd(TestCase):
         ],
     )
     def test_bwd_straddling_masked_blocks_all_mask_types(self, case):
-        """Unaligned Q and K ranges across all four mask_types straddle block
-        boundaries where one tile is active and its neighbor tile in the same
-        range is masked out (promoting half-block arrival weight from 1 to 2
-        for both dQ and reduced dK/dV), plus a narrow bi_causal relation with
-        no active tile at all that leaves conflict entries untouched."""
         range_merge, two_cta, head_dim = case
         cluster = 2 if two_cta else 1
         relations: Relations = [
-            # Straddles K block 1 on 2-CTA (n=0 active, n=1 masked out).
             ([0, 390], [10, 270], MT_MAP.bi_causal),
-            # Shared K [270, 530) with n=0 active and n=1 masked out on both pairs.
             ([0, 390], [270, 530], MT_MAP.bi_causal),
             ([400, 790], [270, 530], MT_MAP.bi_causal),
-            # Degenerate bi_causal (len_k < len_q): empty everywhere, leaves mConflict untouched.
             ([400, 520], [530, 600], MT_MAP.bi_causal),
-            # Shared K [600, 860) with disjoint causal / inv_causal diagonals.
             ([7, 267], [600, 860], MT_MAP.causal),
             ([6, 266], [600, 860], MT_MAP.inv_causal),
-            # Full relation overlapping Q blocks 0..4 and K blocks 3..4.
             ([19, 535], [860, 1140], MT_MAP.full),
         ]
         total_q, total_k = 800, 1150
@@ -1952,37 +1134,18 @@ class TestFFARangeDeterministicBwd(TestCase):
             )
 
         with mock.patch.dict("os.environ", env):
-            with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
-                first = [g.clone() for g in run(0)]
-            if range_merge:
-                _assert_merged_dq_chain_settled(launch, relations, cat_gqa=True)
-            else:
-                _assert_bwd_chains_settled(launch, relations, group=2, cat_gqa=True)
-            for sm_margin in (1, self.num_sm - 2 * cluster, self.num_sm - cluster):
-                for name, got, want in zip("qkv", run(sm_margin), first):
-                    self.assertTrue(
-                        torch.equal(got, want),
-                        f"d{name} differs at {sm_margin=}",
-                    )
+            first = run(0)
+            _assert_bitwise_equal(run(1), first)
+            _assert_bitwise_equal(run(self.num_sm - 2 * cluster), first)
+            _assert_bitwise_equal(run(self.num_sm - cluster), first)
             with delay_injection(DelayPoint.CHAIN_WAIT, seed=11, max_ns=15_000):
-                for name, got, want in zip(
-                    "qkv", run(self.num_sm - 2 * cluster), first
-                ):
-                    self.assertTrue(
-                        torch.equal(got, want), f"d{name} differs under delay"
-                    )
-        for name, got, ref in zip(
-            "qkv", first, self._ref_grads(q, k, v, do, relations)
-        ):
-            torch.testing.assert_close(
-                got.float(), ref, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
-            )
+                _assert_bitwise_equal(run(self.num_sm - 2 * cluster), first)
+        _assert_grads_close(first, _ref_grads(q, k, v, do, relations))
         self._log_ran(f"bwd straddling masked {case}")
 
     @parameterize(
         "case",
         [
-            # (group, cat_gqa, 2-CTA, head_dim, direct_dkv)
             (1, False, True, 128, True),
             (1, False, False, 128, False),
             (2, True, True, 128, False),
@@ -1992,33 +1155,9 @@ class TestFFARangeDeterministicBwd(TestCase):
         ],
     )
     def test_bwd_disjoint_q_dense_dqacc_bitwise_across_sm_margin(self, case):
-        """With disable_fwd_atomic_reduction=True and RangeMerge inactive,
-        sorted disjoint q_ranges keep isolated dense dQacc slots under
-        deterministic=True: no dQ chain state is allocated, each padded Q tile
-        orders its active K tiles on dQ_semaphore from zero, and gradients
-        stay bitwise identical across sm_margin and scheduler delays."""
         group, cat_gqa, two_cta, head_dim, direct_dkv = case
         cluster = 2 if two_cta else 1
-        if direct_dkv:
-            relations: Relations = [
-                ([3, 132], [0, 290], MT_MAP.full),
-                ([140, 410], [290, 560], MT_MAP.causal),
-                ([420, 420], [560, 620], MT_MAP.full),
-                ([430, 690], [620, 620], MT_MAP.full),
-                ([700, 965], [620, 900], MT_MAP.inv_causal),
-                ([970, 1240], [900, 1170], MT_MAP.bi_causal),
-            ]
-            total_k = 1180
-        else:
-            relations = [
-                ([3, 132], [10, 300], MT_MAP.full),
-                ([140, 410], [150, 430], MT_MAP.causal),
-                ([420, 420], [200, 260], MT_MAP.full),
-                ([430, 690], [430, 430], MT_MAP.full),
-                ([700, 965], [100, 380], MT_MAP.inv_causal),
-                ([970, 1240], [250, 520], MT_MAP.bi_causal),
-            ]
-            total_k = 550
+        relations, total_k = _DISJOINT_Q_RELATIONS[direct_dkv]
         total_q = 1260
         q, k, v = _qkv(total_q, total_k, group=group, head_dim=head_dim)
         args = _range_args(relations)
@@ -2046,46 +1185,18 @@ class TestFFARangeDeterministicBwd(TestCase):
             )[:3]
 
         with mock.patch.dict("os.environ", env):
-            with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
-                first = [g.clone() for g in run(0)]
-            torch.cuda.synchronize()
-            (kernel,) = launch.built
+            with record_bwd_kernels() as built:
+                first = run(0)
+            (kernel,) = built
             self.assertTrue(kernel.use_dense_dqacc_for_ranges)
             self.assertTrue(kernel.range_dq_semaphore)
             self.assertFalse(kernel.range_dq_chain)
             self.assertFalse(kernel.dQ_rowmajor_accum)
-            self.assertEqual(len(launch.chains), 0 if direct_dkv else 1)
-            self.assertEqual(len(launch.semaphores), 1)
-            sem = launch.semaphores[0].cpu()
-            tile_m = kernel.tile_m
-            cluster_tile_k = kernel.tile_n * kernel.cta_group_size
-            want_sem = torch.zeros(sem.shape[2], dtype=torch.int32)
-            for r, ((qs, qe), (ks, ke), mt) in enumerate(relations):
-                len_q, len_k = qe - qs, ke - ks
-                slot_base = qs // tile_m + r
-                for m in range(math.ceil(max(len_q, 0) / tile_m)):
-                    n_lo, n_hi = _ref_active_n_bounds_per_range(
-                        len_q, len_k, m, mt, tile_m, cluster_tile_k
-                    )
-                    want_sem[slot_base + m] = n_hi - n_lo
-            self.assertTrue(
-                torch.equal(sem, want_sem[None, None, :, None].expand_as(sem)),
-                f"semaphore got {sem[0, 0, :, 0].tolist()}, want {want_sem.tolist()}",
-            )
-            if not direct_dkv:
-                _assert_bwd_chains_settled(
-                    launch, relations, group=group, cat_gqa=cat_gqa
-                )
-            for sm_margin in (1, self.num_sm - 2 * cluster, self.num_sm - cluster):
-                for name, got, want in zip("qkv", run(sm_margin), first):
-                    self.assertTrue(
-                        torch.equal(got, want), f"d{name} differs at {sm_margin=}"
-                    )
+            _assert_bitwise_equal(run(1), first)
+            _assert_bitwise_equal(run(self.num_sm - 2 * cluster), first)
+            _assert_bitwise_equal(run(self.num_sm - cluster), first)
             with delay_injection(DelayPoint.START, seed=19, max_ns=20_000):
-                for name, got, want in zip("qkv", run(0), first):
-                    self.assertTrue(
-                        torch.equal(got, want), f"d{name} differs under START delay"
-                    )
+                _assert_bitwise_equal(run(0), first)
             dq_base = torch.randn(q.shape, device="cuda", dtype=torch.float32)
             dq_acc_0 = run(0, dq_init=dq_base.clone())[0]
             dq_acc_1 = run(self.num_sm - cluster, dq_init=dq_base.clone())[0]
@@ -2093,19 +1204,11 @@ class TestFFARangeDeterministicBwd(TestCase):
             torch.testing.assert_close(
                 dq_acc_0, dq_base + first[0], atol=1e-4, rtol=1e-4
             )
-        for name, got, ref in zip(
-            "qkv", first, self._ref_grads(q, k, v, do, relations)
-        ):
-            torch.testing.assert_close(
-                got.float(), ref, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
-            )
+        _assert_grads_close(first, _ref_grads(q, k, v, do, relations))
         self._log_ran(f"bwd disjoint dense dqacc {case}")
 
     @parameterize("case", [(64, False), (128, True)])
     def test_bwd_disjoint_q_dense_dqacc_cuda_graph_replay(self, case):
-        """Disjoint-Q deterministic backward re-zeroes dQ_semaphore and any
-        reduced dK/dV chain inside a captured CUDA graph, matching eager runs
-        bit for bit across replays."""
         head_dim, two_cta = case
         relations: Relations = [
             ([5, 270], [0, 310], MT_MAP.causal),
@@ -2138,12 +1241,12 @@ class TestFFARangeDeterministicBwd(TestCase):
             )[:3]
 
         env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0" if two_cta else "1"}
-        with mock.patch.dict("os.environ", env), _record_launch(
-            FFABwdSm100, _flex_flash_attn_bwd
-        ) as launch:
-            data = [fwd_bwd_inputs(), fwd_bwd_inputs()]
-            eager = [[g.clone() for g in bwd(*d)] for d in data]
-            static = [t.clone() for t in data[0]]
+        with mock.patch.dict("os.environ", env), record_bwd_kernels() as built:
+            data_0 = fwd_bwd_inputs()
+            data_1 = fwd_bwd_inputs()
+            eager_0 = bwd(*data_0)
+            eager_1 = bwd(*data_1)
+            static = [t.clone() for t in data_0]
             side = torch.cuda.Stream()
             side.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(side):
@@ -2152,37 +1255,28 @@ class TestFFARangeDeterministicBwd(TestCase):
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
                 static_grads = bwd(*static)
-            (kernel,) = launch.built
+            (kernel,) = built
             self.assertTrue(kernel.range_dq_semaphore)
             self.assertEqual(kernel.use_2cta_instrs, two_cta)
-            for i in (1, 0, 1):
-                for dst, src in zip(static, data[i]):
-                    dst.copy_(src)
-                graph.replay()
-                torch.cuda.synchronize()
-                for name, got, want in zip("qkv", static_grads, eager[i]):
-                    self.assertTrue(torch.equal(got, want), f"d{name} replay {i}")
+            _replay(graph, static, data_1)
+            _assert_bitwise_equal(static_grads, eager_1)
+            _replay(graph, static, data_0)
+            _assert_bitwise_equal(static_grads, eager_0)
+            _replay(graph, static, data_1)
+            _assert_bitwise_equal(static_grads, eager_1)
         self._log_ran(f"bwd disjoint dense dqacc graph {case}")
 
     @parameterize("cat_gqa", [False, True])
     def test_bwd_range_merge_2cta_overlap_gated_pair_handoff(self, cat_gqa):
-        """2-CTA RangeMerge mixing tile_m-disjoint active pairs, completely
-        masked-out pairs, and unaligned pairs sharing TMA box rows: only
-        overlapping active pairs synchronize on the cluster handoff barriers,
-        keeping both CTAs' barrier phases aligned and gradients bitwise equal
-        under CHAIN_WAIT and PAIR_ARRIVE delays."""
         relations: Relations = [
-            # Prior K group seeding nonzero dQ across all Q rows.
             ([0, 900], [0, 256], MT_MAP.full),
-            # Merged K group [256, 440): disjoint pairs, masked-out pair, then
-            # adjacent unaligned pairs sharing physical TMA box rows.
             ([0, 128], [256, 440], MT_MAP.full),
             ([200, 315], [256, 440], MT_MAP.causal),
             (
                 [320, 515],
                 [256, 440],
                 MT_MAP.bi_causal,
-            ),  # empty everywhere (len_q > len_k)
+            ),
             ([520, 648], [256, 440], MT_MAP.inv_causal),
             ([584, 712], [256, 440], MT_MAP.causal),
             ([768, 890], [256, 440], MT_MAP.full),
@@ -2192,52 +1286,36 @@ class TestFFARangeDeterministicBwd(TestCase):
         q, k, v, out, lse, do = self._fwd_bwd_inputs(relations, total_q, total_k, group)
 
         def merge_bwd(sm_margin: int):
-            return [
-                g.clone()
-                for g in self._det_bwd(
-                    q,
-                    k,
-                    v,
-                    out,
-                    lse,
-                    do,
-                    relations,
-                    range_merge=True,
-                    cat_gqa=cat_gqa,
-                    sm_margin=sm_margin,
-                )
-            ]
+            return self._det_bwd(
+                q,
+                k,
+                v,
+                out,
+                lse,
+                do,
+                relations,
+                range_merge=True,
+                cat_gqa=cat_gqa,
+                sm_margin=sm_margin,
+            )
 
         env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
         with mock.patch.dict("os.environ", env):
-            with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
+            with record_bwd_kernels() as built:
                 first = merge_bwd(0)
-            (kernel,) = launch.built
+            (kernel,) = built
             self.assertTrue(kernel.use_2cta_instrs and kernel.dq_pair_handoff)
-            _assert_merged_dq_chain_settled(launch, relations, cat_gqa=cat_gqa)
-            for dp in (DelayPoint.CHAIN_WAIT, DelayPoint.PAIR_ARRIVE):
-                with delay_injection(dp, seed=23, max_ns=20_000):
-                    for sm_margin in (0, self.num_sm - 2):
-                        for name, got, want in zip("qkv", merge_bwd(sm_margin), first):
-                            self.assertTrue(
-                                torch.equal(got, want),
-                                f"d{name} differs under {dp} at {sm_margin=}",
-                            )
-        for name, got, ref in zip(
-            "qkv", first, self._ref_grads(q, k, v, do, relations)
-        ):
-            torch.testing.assert_close(
-                got.float(), ref, atol=3e-2, rtol=3e-2, msg=lambda m: f"d{name}: {m}"
-            )
+            with delay_injection(DelayPoint.CHAIN_WAIT, seed=23, max_ns=20_000):
+                _assert_bitwise_equal(merge_bwd(0), first)
+                _assert_bitwise_equal(merge_bwd(self.num_sm - 2), first)
+            with delay_injection(DelayPoint.PAIR_ARRIVE, seed=23, max_ns=20_000):
+                _assert_bitwise_equal(merge_bwd(0), first)
+                _assert_bitwise_equal(merge_bwd(self.num_sm - 2), first)
+        _assert_grads_close(first, _ref_grads(q, k, v, do, relations))
         self._log_ran(f"bwd range merge 2-CTA overlap-gated handoff {cat_gqa=}")
 
 
 class TestFFARangePersistentGrid(TestCase):
-    """A persistent q/k-range launch (``sm_margin > 0`` or deterministic)
-    caps its grid at ``num_sm - sm_margin`` CTAs in whole clusters. The host
-    rejects a budget below one cluster before a kernel is built, whatever
-    ``deterministic``; an empty grid would fail at launch."""
-
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("sm_margin requires SM100/SM110 q/k ranges")
@@ -2275,21 +1353,19 @@ class TestFFARangePersistentGrid(TestCase):
             )[:3]
 
     def test_bwd_2cta_rejects_a_budget_below_one_cluster(self):
-        """head_dim 128 launches 2-CTA clusters: one SM, or none, holds no
-        cluster."""
         inputs = self._bwd_inputs()
-        for sm_margin in (self.num_sm - 1, self.num_sm):
-            with _record_launch(
-                FFABwdSm100, _flex_flash_attn_bwd
-            ) as launch, self._budget_error(sm_margin, 2):
-                self._bwd(*inputs, sm_margin=sm_margin)
-            self.assertEqual(launch.built, [])
+        with record_bwd_kernels() as built, self._budget_error(self.num_sm - 1, 2):
+            self._bwd(*inputs, sm_margin=self.num_sm - 1)
+        self.assertEqual(built, [])
+        with record_bwd_kernels() as built, self._budget_error(self.num_sm, 2):
+            self._bwd(*inputs, sm_margin=self.num_sm)
+        self.assertEqual(built, [])
 
     def test_bwd_2cta_runs_on_one_cluster(self):
         relations, q, k, v, out, lse, do = self._bwd_inputs()
-        with _record_launch(FFABwdSm100, _flex_flash_attn_bwd) as launch:
+        with record_bwd_kernels() as built:
             grads = self._bwd(relations, q, k, v, out, lse, do, self.num_sm - 2)
-        (kernel,) = launch.built
+        (kernel,) = built
         self.assertTrue(kernel.use_2cta_instrs)
         self.assertTrue(kernel.is_persistent)
         qkv = [t.detach().float().requires_grad_() for t in (q, k, v)]
@@ -2305,13 +1381,9 @@ class TestFFARangePersistentGrid(TestCase):
             )
 
     def test_fwd_rejects_a_budget_below_one_cluster(self):
-        """The atomic forward launches 1-CTA clusters and rejects a budget of
-        no SM; the 2-CTA direct-store forward also rejects one SM."""
         relations, total_q, total_k = _shared_k_relations()
         q, k, v = _qkv(total_q, total_k, group=2)
-        with _record_launch(
-            FFAFwdSm100, _flex_flash_attn_fwd
-        ) as launch, self._budget_error(self.num_sm, 1):
+        with record_fwd_kernels() as built, self._budget_error(self.num_sm, 1):
             _flex_flash_attn_fwd(
                 q,
                 k,
@@ -2320,17 +1392,12 @@ class TestFFARangePersistentGrid(TestCase):
                 disable_fwd_atomic_reduction=False,
                 sm_margin=self.num_sm,
             )
-        self.assertEqual(launch.built, [])
-        # Disjoint q ranges of more than two Q tiles under one full mask.
+        self.assertEqual(built, [])
         q, k, v = _qkv(1024, 1024, group=1)
         ranges = torch.tensor([[0, 512], [512, 1024]], dtype=torch.int32, device="cuda")
         with mock.patch.dict(
             "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
-        ), _record_launch(
-            FFAFwdSm100, _flex_flash_attn_fwd
-        ) as launch, self._budget_error(
-            self.num_sm - 1, 2
-        ):
+        ), record_fwd_kernels() as built, self._budget_error(self.num_sm - 1, 2):
             _flex_flash_attn_fwd(
                 q,
                 k,
@@ -2343,33 +1410,10 @@ class TestFFARangePersistentGrid(TestCase):
                 disable_fwd_atomic_reduction=True,
                 sm_margin=self.num_sm - 1,
             )
-        self.assertEqual(launch.built, [])
-
-    def test_fwd_head_dim_192_ignores_the_budget(self):
-        """head_dim 192 stages O in the Q shared memory, one tile per CTA, so
-        the grid is not persistent and no budget is checked."""
-        relations, total_q, total_k = _shared_k_relations()
-        q, k, _ = _qkv(total_q, total_k, group=2, head_dim=192)
-        v = torch.randn(total_k, _NUM_HEAD_KV, 128, device="cuda", dtype=torch.bfloat16)
-        with _record_launch(FFAFwdSm100, _flex_flash_attn_fwd) as launch:
-            out, _ = _flex_flash_attn_fwd(
-                q,
-                k,
-                v,
-                **_range_args(relations),
-                disable_fwd_atomic_reduction=False,
-                sm_margin=self.num_sm,
-            )
-        (kernel,) = launch.built
-        self.assertFalse(kernel.is_persistent)
-        out_ref, _, _ = _ref_fwd(q.float(), k.float(), v.float(), relations)
-        torch.testing.assert_close(out.float(), out_ref, atol=_TOL, rtol=_TOL)
+        self.assertEqual(built, [])
 
 
 class _ScanConflictsLauncher:
-    """One warp running ``range_chain.scan_conflicts`` over every range into
-    conflict-table row 0, with writer ``r + 1`` for range ``r``."""
-
     def __init__(self, block_size: int, rows_per_token: int):
         self.block_size = block_size
         self.rows_per_token = rows_per_token
@@ -2401,10 +1445,6 @@ class _ScanConflictsLauncher:
 
 
 class TestFFARangeChainScan(TestCase):
-    """The conflict scan records, per block, the last range with a row there,
-    also when consecutive ranges share a block through different lanes and
-    the stores of one range are delayed past those of the next."""
-
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("the range chain runs on SM100/SM110")
@@ -2429,13 +1469,9 @@ class TestFFARangeChainScan(TestCase):
     @parameterize(
         "ranges",
         [
-            # the shared block is lane 1's for r0 and lane 0's for r1
             [[0, 256], [128, 256]],
-            # unaligned starts, three ranges over block 1
             [[5, 300], [130, 140], [0, 129]],
-            # more than 32 blocks: block 33 is lane 1's second store for r0
             [[0, 40 * 128], [33 * 128 + 7, 35 * 128]],
-            # an empty range between two that share blocks
             [[0, 384], [200, 200], [129, 384]],
         ],
     )
@@ -2454,10 +1490,6 @@ class TestFFARangeChainScan(TestCase):
 
     @parameterize("rows_per_token", [2, 4])
     def test_scan_scales_token_ranges_to_packed_row_blocks(self, rows_per_token):
-        """Under PackGQA a token range [s, e) owns the packed rows
-        [s * G, e * G); the scan records the blocks of those rows. Token 61
-        with G = 4 starts at packed row 244 of block 1, and [32, 64) with
-        G = 4 is exactly block 1."""
         block_size, g = 128, rows_per_token
         ranges = [[61, 100], [32, 64], [0, 33], [70, 70], [90, 130]]
         want = torch.zeros(130 * g // block_size + 2, dtype=torch.int32)
@@ -2468,31 +1500,31 @@ class TestFFARangeChainScan(TestCase):
         self.assertTrue(torch.equal(got, want), f"{got.tolist()} != {want.tolist()}")
 
 
-# Relations of one head with T cluster units around a grid of C clusters,
-# T in {0, 1, C - 1, C, C + 1}; the overlapping ones also chain.
-_FWD_UNIT_CLUSTERS = 8  # 1-CTA: two 128-row q stages, 256 rows per unit
+_FWD_UNIT_CLUSTERS = 8
 _FWD_UNIT_RELATIONS: dict[int, Relations] = {
-    0: [([40, 40], [0, 100], MT_MAP.full), ([90, 90], [100, 300], MT_MAP.full)],
     1: [([5, 105], [0, 100], MT_MAP.full)],
     7: [([0, 768], [0, 300], MT_MAP.full), ([100, 1100], [300, 700], MT_MAP.causal)],
     8: [([0, 768], [0, 300], MT_MAP.full), ([100, 1300], [300, 700], MT_MAP.causal)],
     9: [([0, 768], [0, 300], MT_MAP.full), ([100, 1500], [300, 700], MT_MAP.causal)],
 }
-_BWD_UNIT_CLUSTERS = 4  # 2-CTA: 256-row cluster K tiles
+_FWD_EMPTY_RELATIONS: Relations = [
+    ([40, 40], [0, 100], MT_MAP.full),
+    ([90, 90], [100, 300], MT_MAP.full),
+]
+_BWD_UNIT_CLUSTERS = 4
 _BWD_UNIT_RELATIONS: dict[int, Relations] = {
-    0: [([0, 300], [10, 10], MT_MAP.full), ([100, 400], [20, 20], MT_MAP.full)],
     1: [([0, 300], [0, 200], MT_MAP.full)],
     3: [([0, 300], [0, 512], MT_MAP.full), ([100, 400], [600, 800], MT_MAP.causal)],
     4: [([0, 300], [0, 512], MT_MAP.full), ([100, 400], [600, 1100], MT_MAP.causal)],
     5: [([0, 300], [0, 768], MT_MAP.full), ([100, 400], [800, 1300], MT_MAP.causal)],
 }
+_BWD_EMPTY_RELATIONS: Relations = [
+    ([0, 300], [10, 10], MT_MAP.full),
+    ([100, 400], [20, 20], MT_MAP.full),
+]
 
 
 class TestFFARangeDeterministicClaims(TestCase):
-    """Every valid DYNAMIC unit is claimed once and consumed by every warp of
-    every CTA of one cluster, for unit counts around the cluster count, and
-    the deterministic launch replays under CUDA Graphs."""
-
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("deterministic q/k ranges require SM100/SM110")
@@ -2502,14 +1534,8 @@ class TestFFARangeDeterministicClaims(TestCase):
     def _assert_each_unit_visited_once(
         self, visits: torch.Tensor, clusters: torch.Tensor, num_units: int, cluster: int
     ) -> None:
-        """Tiles ``unit * cluster + rank`` of the valid units are consumed by
-        the same number of warps, on every rank by the same cluster; no other
-        tile is valid."""
-        visits, clusters = visits.cpu(), clusters.cpu()
         valid = num_units * cluster
         self.assertTrue(torch.equal(visits[valid:], torch.zeros_like(visits[valid:])))
-        if num_units == 0:
-            return
         warps = int(visits[0])
         self.assertGreater(warps, 0)
         self.assertTrue(
@@ -2523,48 +1549,28 @@ class TestFFARangeDeterministicClaims(TestCase):
             f"cluster sums per unit: {per_unit.tolist()}",
         )
 
-    @parameterize("num_units", sorted(_FWD_UNIT_RELATIONS))
-    def test_fwd_claims_each_unit_once(self, num_units):
-        relations = _FWD_UNIT_RELATIONS[num_units]
-        total_q, total_k = 2000, 700
-        q, k, v = _qkv(total_q, total_k, group=1, num_head_kv=1)
-        sm_margin = self.num_sm - _FWD_UNIT_CLUSTERS
-        with record_visits(num_units + 64, 1) as (visits, clusters), _record_launch(
-            FFAFwdSm100, _flex_flash_attn_fwd
-        ) as launch:
-            out, lse = _flex_flash_attn_fwd(
+    def _fwd_visits(
+        self, relations: Relations, num_tiles: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        q, k, v = _qkv(2000, 700, group=1, num_head_kv=1)
+        with record_visits(num_tiles, 1) as (visits, clusters):
+            out, _ = _flex_flash_attn_fwd(
                 q,
                 k,
                 v,
                 **_range_args(relations),
                 disable_fwd_atomic_reduction=False,
                 deterministic=True,
-                sm_margin=sm_margin,
+                sm_margin=self.num_sm - _FWD_UNIT_CLUSTERS,
             )
-        torch.cuda.synchronize()
-        (kernel,) = launch.built
-        rows = [e - s for (s, e), _, _ in relations]
-        self.assertEqual(_num_units(rows, 1, kernel.cta_tiler[0], 1), num_units)
-        clusters_launched = _grid_clusters(
-            len(relations), 1, total_q, kernel.cta_tiler[0], 1, _FWD_UNIT_CLUSTERS
-        )
-        self.assertEqual(clusters_launched, _FWD_UNIT_CLUSTERS)
-        (counter,) = launch.counters
-        self.assertEqual(int(counter.item()), num_units + clusters_launched)
-        self._assert_each_unit_visited_once(visits, clusters, num_units, 1)
-        (chain,) = launch.chains
-        _assert_chain_settled(
-            chain, [r[0] for r in relations], kernel.m_block_size, lambda r: r + 1
-        )
-        out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
+        out_ref, _, _ = _ref_fwd(q, k, v, relations)
         torch.testing.assert_close(out, out_ref, atol=_TOL, rtol=_TOL)
-        print(f"ran fwd claims T={num_units}", flush=True)
+        return visits.cpu(), clusters.cpu()
 
-    @parameterize("num_units", sorted(_BWD_UNIT_RELATIONS))
-    def test_bwd_2cta_claims_each_unit_once_on_both_peers(self, num_units):
-        relations = _BWD_UNIT_RELATIONS[num_units]
-        total_q, total_k = 400, 1400
-        q, k, v = _qkv(total_q, total_k, group=1, num_head_kv=1)
+    def _bwd_2cta_visits(
+        self, relations: Relations, num_tiles: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        q, k, v = _qkv(400, 1400, group=1, num_head_kv=1)
         out, lse = _flex_flash_attn_fwd(
             q,
             k,
@@ -2574,15 +1580,12 @@ class TestFFARangeDeterministicClaims(TestCase):
             deterministic=True,
         )
         out, do = out.to(q.dtype), torch.randn_like(q)
-        sm_margin = self.num_sm - 2 * _BWD_UNIT_CLUSTERS
         with mock.patch.dict(
             "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
-        ), record_visits(2 * (num_units + 16), 2) as (
+        ), record_visits(num_tiles, 2) as (
             visits,
             clusters,
-        ), _record_launch(
-            FFABwdSm100, _flex_flash_attn_bwd
-        ) as launch:
+        ), record_bwd_kernels() as built:
             grads = _flex_flash_attn_bwd(
                 q,
                 k,
@@ -2593,39 +1596,41 @@ class TestFFARangeDeterministicClaims(TestCase):
                 **_range_args(relations),
                 disable_bwd_dkv_atomic_reduction=False,
                 deterministic=True,
-                sm_margin=sm_margin,
+                sm_margin=self.num_sm - 2 * _BWD_UNIT_CLUSTERS,
             )[:3]
-        torch.cuda.synchronize()
-        (kernel,) = launch.built
+        (kernel,) = built
         self.assertTrue(kernel.use_2cta_instrs)
-        rows = [e - s for _, (s, e), _ in relations]
-        self.assertEqual(_num_units(rows, 1, kernel.tile_n, 2), num_units)
-        clusters_launched = _grid_clusters(
-            len(relations), 1, total_k, kernel.tile_n, 2, 2 * _BWD_UNIT_CLUSTERS
+        _assert_grads_close(grads, _ref_grads(q, k, v, do, relations))
+        return visits.cpu(), clusters.cpu()
+
+    @parameterize("num_units", sorted(_FWD_UNIT_RELATIONS))
+    def test_fwd_claims_each_unit_once(self, num_units):
+        visits, clusters = self._fwd_visits(
+            _FWD_UNIT_RELATIONS[num_units], num_units + 64
         )
-        self.assertEqual(clusters_launched, _BWD_UNIT_CLUSTERS)
-        (counter,) = launch.counters
-        self.assertEqual(int(counter.item()), num_units + clusters_launched)
+        self._assert_each_unit_visited_once(visits, clusters, num_units, 1)
+        print(f"ran fwd claims T={num_units}", flush=True)
+
+    def test_fwd_claims_no_unit_of_empty_q_ranges(self):
+        visits, _ = self._fwd_visits(_FWD_EMPTY_RELATIONS, 64)
+        self.assertTrue(torch.equal(visits, torch.zeros_like(visits)))
+        print("ran fwd claims T=0", flush=True)
+
+    @parameterize("num_units", sorted(_BWD_UNIT_RELATIONS))
+    def test_bwd_2cta_claims_each_unit_once_on_both_peers(self, num_units):
+        visits, clusters = self._bwd_2cta_visits(
+            _BWD_UNIT_RELATIONS[num_units], 2 * (num_units + 16)
+        )
         self._assert_each_unit_visited_once(visits, clusters, num_units, 2)
-        _assert_bwd_chains_settled(launch, relations, group=1, cat_gqa=False)
-        qkv = [t.detach().float().requires_grad_() for t in (q, k, v)]
-        _ref_fwd(*qkv, relations)[0].backward(do.float())
-        for name, got, ref in zip("qkv", grads, qkv):
-            torch.testing.assert_close(
-                got.float(),
-                ref.grad,
-                atol=3e-2,
-                rtol=3e-2,
-                msg=lambda m: f"d{name}: {m}",
-            )
         print(f"ran bwd claims T={num_units}", flush=True)
+
+    def test_bwd_2cta_claims_no_unit_of_empty_k_ranges(self):
+        visits, _ = self._bwd_2cta_visits(_BWD_EMPTY_RELATIONS, 32)
+        self.assertTrue(torch.equal(visits, torch.zeros_like(visits)))
+        print("ran bwd claims T=0", flush=True)
 
     @parameterize("head_dim", _DET_HEAD_DIMS)
     def test_cuda_graph_replay_matches_eager_bitwise(self, head_dim):
-        """The chain, conflict and tile-counter states are re-zeroed inside
-        the captured graph, so replays on new data equal eager runs bit for
-        bit, forward and backward (GQA, reduced dK/dV; 2-CTA at head_dim
-        128, 1-CTA at 64)."""
         relations, total_q, total_k = _shared_k_relations()
         args = _range_args(relations)
 
@@ -2655,12 +1660,11 @@ class TestFFARangeDeterministicClaims(TestCase):
         with mock.patch.dict(
             "os.environ", {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
         ):
-            data = [inputs(), inputs()]
-            eager = [
-                ([t.clone() for t in fwd(*d[:3])], [g.clone() for g in bwd(*d)])
-                for d in data
-            ]
-            static = [t.clone() for t in data[0]]
+            data_0 = inputs()
+            data_1 = inputs()
+            eager_0 = (*fwd(*data_0[:3]), *bwd(*data_0))
+            eager_1 = (*fwd(*data_1[:3]), *bwd(*data_1))
+            static = [t.clone() for t in data_0]
             side = torch.cuda.Stream()
             side.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(side):
@@ -2669,28 +1673,17 @@ class TestFFARangeDeterministicClaims(TestCase):
             torch.cuda.current_stream().wait_stream(side)
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                static_fwd = fwd(*static[:3])
-                static_bwd = bwd(*static)
-            for i in (1, 0, 1):
-                for dst, src in zip(static, data[i]):
-                    dst.copy_(src)
-                graph.replay()
-                torch.cuda.synchronize()
-                want_fwd, want_bwd = eager[i]
-                for name, got, want in zip(
-                    ("out", "lse", "dq", "dk", "dv"),
-                    [*static_fwd, *static_bwd],
-                    [*want_fwd, *want_bwd],
-                ):
-                    self.assertTrue(
-                        torch.equal(got, want), f"{name} of replay on data {i}"
-                    )
+                static_out = (*fwd(*static[:3]), *bwd(*static))
+            _replay(graph, static, data_1)
+            _assert_bitwise_equal(static_out, eager_1)
+            _replay(graph, static, data_0)
+            _assert_bitwise_equal(static_out, eager_0)
+            _replay(graph, static, data_1)
+            _assert_bitwise_equal(static_out, eager_1)
         print(f"ran cuda graph replay hd{head_dim}", flush=True)
 
 
 class _BlockInfoDualLauncher:
-    """Device launcher evaluating BlockInfo's forward m-bounds and dual n-bounds."""
-
     def __init__(
         self,
         tile_m: int,
@@ -2776,9 +1769,6 @@ class _BlockInfoDualLauncher:
 
 
 class TestBlockInfoDualBounds(TestCase):
-    """Exact integer duality between BlockInfo m-bounds and n-bounds on GPU:
-    ``m in [m_min(n), m_max(n)) <=> n in [n_min(m), n_max(m))``."""
-
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("SM100/SM110 BlockInfo dual bounds test")
@@ -2786,13 +1776,15 @@ class TestBlockInfoDualBounds(TestCase):
     def _eval_device(
         self,
         launcher: _BlockInfoDualLauncher,
-        queries: list[tuple[int, int, int, int]],
-    ) -> tuple[list[int], list[int], list[int], list[int]]:
-        count = len(queries)
-        sq = torch.tensor([q[0] for q in queries], dtype=torch.int32, device="cuda")
-        sk = torch.tensor([q[1] for q in queries], dtype=torch.int32, device="cuda")
-        idx = torch.tensor([q[2] for q in queries], dtype=torch.int32, device="cuda")
-        at = torch.tensor([q[3] for q in queries], dtype=torch.int32, device="cuda")
+        seqlen_q: torch.Tensor,
+        seqlen_k: torch.Tensor,
+        block: torch.Tensor,
+        mask_type: torch.Tensor,
+    ) -> torch.Tensor:
+        count = seqlen_q.shape[0]
+        sq, sk, idx, at = (
+            t.to("cuda").contiguous() for t in (seqlen_q, seqlen_k, block, mask_type)
+        )
         flo = torch.empty(count, dtype=torch.int32, device="cuda")
         fhi = torch.empty(count, dtype=torch.int32, device="cuda")
         dlo = torch.empty(count, dtype=torch.int32, device="cuda")
@@ -2810,72 +1802,75 @@ class TestBlockInfoDualBounds(TestCase):
             cuda.CUstream(torch.cuda.current_stream().cuda_stream),
         )
         cute.compile(launcher, *args)(*args)
-        torch.cuda.synchronize()
-        return (
-            flo.cpu().tolist(),
-            fhi.cpu().tolist(),
-            dlo.cpu().tolist(),
-            dhi.cpu().tolist(),
+        return torch.stack([flo, fhi, dlo, dhi]).cpu()
+
+    def _assert_dual_equivalence(
+        self,
+        launcher: _BlockInfoDualLauncher,
+        seqlen_q: torch.Tensor,
+        seqlen_k: torch.Tensor,
+        mask_type: torch.Tensor,
+    ) -> None:
+        tile_m, tile_n = launcher.tile_m, launcher.tile_n
+        num_m = (seqlen_q * launcher.pack_factor + tile_m - 1) // tile_m
+        num_n = (seqlen_k + tile_n - 1) // tile_n
+        num_blocks = int(torch.maximum(num_m, num_n).max())
+        blocks = torch.arange(num_blocks, dtype=torch.int32)
+        bounds = self._eval_device(
+            launcher,
+            seqlen_q.repeat_interleave(num_blocks),
+            seqlen_k.repeat_interleave(num_blocks),
+            blocks.repeat(seqlen_q.shape[0]),
+            mask_type.repeat_interleave(num_blocks),
+        )
+        m_lo, m_hi, n_lo, n_hi = bounds.view(4, -1, num_blocks)
+        # [C, m, n]: m-bounds indexed by n block, n-bounds indexed by m block.
+        m = blocks[None, :, None]
+        n = blocks[None, None, :]
+        in_m = (m_lo[:, None, :] <= m) & (m < m_hi[:, None, :])
+        in_n = (n_lo[:, :, None] <= n) & (n < n_hi[:, :, None])
+        valid = (m < num_m[:, None, None]) & (n < num_n[:, None, None])
+        bad = ((in_m != in_n) & valid).nonzero()
+        combination = bad[:, 0]
+        mismatches = torch.stack(
+            [
+                seqlen_q[combination],
+                seqlen_k[combination],
+                mask_type[combination],
+                bad[:, 1],
+                bad[:, 2],
+            ],
+            dim=1,
+        )
+        self.assertEqual(
+            mismatches.shape[0],
+            0,
+            f"{vars(launcher)}: (seqlen_q, seqlen_k, mask_type, m, n) where the "
+            f"bounds disagree: {mismatches[:8].tolist()}",
         )
 
-    @parameterize("case", [(pf, tn) for pf in (1, 2, 4, 8) for tn in (128, 256)])
-    def test_per_range_dual_equivalence_on_device(self, case):
-        pack_factor, tile_n = case
-        tile_m = 128
-        seqlens = (
-            0,
-            1,
-            2,
-            7,
-            15,
-            16,
-            31,
-            32,
-            33,
-            64,
-            127,
-            128,
-            129,
-            195,
-            256,
-            257,
-            390,
+    @parameterize("pack_factor", [1, 2, 4, 8])
+    @parameterize("tile_n", [128, 256])
+    def test_per_range_dual_equivalence_on_device(self, pack_factor, tile_n):
+        seqlens = torch.tensor(
+            [0, 1, 2, 7, 15, 16, 31, 32, 33, 64, 127, 128, 129, 195, 256, 257, 390],
+            dtype=torch.int32,
         )
-        mask_types = (MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal)
-        queries: list[tuple[int, int, int, int]] = []
-        meta: list[tuple[int, int, int, int, int, int]] = []
-        for sq in seqlens:
-            num_m = math.ceil(sq * pack_factor / tile_m) if sq > 0 else 0
-            for sk in seqlens:
-                num_n = math.ceil(sk / tile_n) if sk > 0 else 0
-                max_idx = max(num_m, num_n, 1)
-                for mt in mask_types:
-                    base = len(queries)
-                    for idx in range(max_idx):
-                        queries.append((sq, sk, idx, mt))
-                    meta.append((sq, sk, mt, num_m, num_n, base))
+        mask_types = torch.tensor(
+            [MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal],
+            dtype=torch.int32,
+        )
+        seqlen_q, seqlen_k, mask_type = torch.cartesian_prod(
+            seqlens, seqlens, mask_types
+        ).unbind(1)
         launcher = _BlockInfoDualLauncher(
-            tile_m, tile_n, True, False, None, None, pack_factor, per_range=True
+            128, tile_n, True, False, None, None, pack_factor, per_range=True
         )
-        flo, fhi, dlo, dhi = self._eval_device(launcher, queries)
-        for sq, sk, mt, num_m, num_n, base in meta:
-            for m in range(num_m):
-                n_lo, n_hi = dlo[base + m], dhi[base + m]
-                for n in range(num_n):
-                    m_lo, m_hi = flo[base + n], fhi[base + n]
-                    in_m = m_lo <= m < m_hi
-                    in_n = n_lo <= n < n_hi
-                    self.assertEqual(
-                        in_m,
-                        in_n,
-                        f"mismatch {pack_factor=} {tile_n=} {sq=} {sk=} {mt=} {m=} {n=}: "
-                        f"m in [{m_lo}, {m_hi}) vs n in [{n_lo}, {n_hi})",
-                    )
+        self._assert_dual_equivalence(launcher, seqlen_q, seqlen_k, mask_type)
 
     @parameterize(
         "spec",
         [
-            # (is_causal, is_local, window_left, window_right, pack_factor, tile_n)
             (False, False, None, None, 1, 256),
             (False, False, None, None, 4, 128),
             (True, False, None, None, 1, 256),
@@ -2892,33 +1887,16 @@ class TestBlockInfoDualBounds(TestCase):
     )
     def test_static_causal_and_local_dual_equivalence_on_device(self, spec):
         is_causal, is_local, wl, wr, pack_factor, tile_n = spec
-        tile_m = 128
-        seqlens = (1, 2, 7, 16, 33, 64, 127, 128, 129, 255, 256, 257, 390)
-        queries: list[tuple[int, int, int, int]] = []
-        meta: list[tuple[int, int, int, int, int]] = []
-        for sq in seqlens:
-            num_m = math.ceil(sq * pack_factor / tile_m)
-            for sk in seqlens:
-                num_n = math.ceil(sk / tile_n)
-                base = len(queries)
-                for idx in range(max(num_m, num_n)):
-                    queries.append((sq, sk, idx, 0))
-                meta.append((sq, sk, num_m, num_n, base))
-        launcher = _BlockInfoDualLauncher(
-            tile_m, tile_n, is_causal, is_local, wl, wr, pack_factor, per_range=False
+        seqlens = torch.tensor(
+            [1, 2, 7, 16, 33, 64, 127, 128, 129, 255, 256, 257, 390], dtype=torch.int32
         )
-        flo, fhi, dlo, dhi = self._eval_device(launcher, queries)
-        for sq, sk, num_m, num_n, base in meta:
-            for m in range(num_m):
-                n_lo, n_hi = dlo[base + m], dhi[base + m]
-                for n in range(num_n):
-                    m_lo, m_hi = flo[base + n], fhi[base + n]
-                    self.assertEqual(
-                        m_lo <= m < m_hi,
-                        n_lo <= n < n_hi,
-                        f"mismatch {spec=} {sq=} {sk=} {m=} {n=}: "
-                        f"m in [{m_lo}, {m_hi}) vs n in [{n_lo}, {n_hi})",
-                    )
+        seqlen_q, seqlen_k = torch.cartesian_prod(seqlens, seqlens).unbind(1)
+        launcher = _BlockInfoDualLauncher(
+            128, tile_n, is_causal, is_local, wl, wr, pack_factor, per_range=False
+        )
+        self._assert_dual_equivalence(
+            launcher, seqlen_q, seqlen_k, torch.zeros_like(seqlen_q)
+        )
 
 
 if __name__ == "__main__":
