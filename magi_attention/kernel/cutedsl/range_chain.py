@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 import cutlass
 import cutlass.cute as cute
@@ -22,6 +21,7 @@ from cutlass import Int32, const_expr
 # isort: split
 from quack.cute_dsl_utils import ParamsBase
 
+from .block_info import BlockInfo
 from .cutedsl_utils import (
     elem_pointer,
     ld_acquire,
@@ -29,16 +29,25 @@ from .cutedsl_utils import (
     mbarrier_wait_acquire_cluster,
     st_global_release_gpu_i32,
 )
+from .ffa_utils import MT_MAP
 
 
 @dataclass
 class ChainTensors(ParamsBase):
-    """Zero-init: mChain[b, h] = [published, count], mConflict[slot, b] = last_writer.
-    Writer j of range r is r * writer_stride + j + 1 (0: none)."""
+    """Publish chain of one output and the checkpoints of its writers.
+
+    ``mChain[b, h] = [published, count]``. Writer ``j`` of range ``r`` is
+    ``r * writer_stride + j + 1`` (0: none), so ``writer_stride`` is the count
+    of writer numbers per range. ``mConflictCkpt[c, b]`` is the highest writer
+    on block ``b`` among ranges ``[0, c * ckpt_stride)`` (0: none), so
+    ``ckpt_stride`` is the count of ranges per checkpoint row; the kernel only
+    reads it.
+    """
 
     mChain: cute.Tensor
-    mConflict: cute.Tensor
+    mConflictCkpt: cute.Tensor
     writer_stride: Int32
+    ckpt_stride: Int32
 
 
 @cute.jit
@@ -73,131 +82,143 @@ def tile_events(
 
 
 @cute.jit
-def scan_conflicts(
-    mRanges: cute.Tensor,
-    mConflict: cute.Tensor,
-    slot: Int32,
-    range_from: Int32,
-    range_to: Int32,
-    block_size: cutlass.Constexpr[int],
-    last_writer: Optional[Callable[[Int32], Int32]] = None,
-    rows_per_token: cutlass.Constexpr[int] = 1,
-    mCuBatches: Optional[cute.Tensor] = None,
-    block_writer: Optional[Callable[[Int32, Int32, Int32], Int32]] = None,
-) -> None:
-    """Warp-collective scan; sync_warp per row orders lanes writing shared blocks."""
-    lane = cute.arch.lane_idx()
-    r = range_from
-    while r < range_to:
-        writer = Int32(0)
-        if const_expr(block_writer is None):
-            assert last_writer is not None
-            writer = last_writer(r)
-        if const_expr(mCuBatches is None):
-            _record_row_blocks(
-                mRanges,
-                mConflict,
-                slot,
-                r,
-                r,
-                writer,
-                block_size,
-                rows_per_token,
-                lane,
-                block_writer=block_writer,
-                monotonic_group_merge=False,
-            )
-            cute.arch.sync_warp()
+def block_tiles(range_start: Int32, block: Int32, block_size: cutlass.Constexpr[int]):
+    """Range-local tiles ``[first, last]`` that overlap physical ``block``;
+    the caller bounds them to the tiles of the range."""
+    first_block = range_start // block_size
+    last = block - first_block
+    first = last
+    if range_start % block_size != 0 and block > first_block:
+        first = last - 1
+    return first, last
+
+
+@cute.jit
+def dq_pair_k_tile_end_on_block(
+    block_info: BlockInfo,
+    seqlen_q: Int32,
+    seqlen_k: Int32,
+    q_start: Int32,
+    attn_type: Int32,
+    block: Int32,
+    use_per_range_mask: cutlass.Constexpr[bool],
+) -> Int32:
+    """1 + the largest K tile for which a pair writes dQ on physical Q
+    ``block``; 0 if none. ``block`` must overlap the Q range of the pair."""
+    k_tile_end = Int32(0)
+    if seqlen_q > 0 and seqlen_k > 0:
+        if const_expr(
+            not use_per_range_mask
+            and not block_info.is_causal
+            and not block_info.is_local
+        ):
+            k_tile_end = cute.ceil_div(seqlen_k, block_info.tile_n)
+        elif const_expr(use_per_range_mask) and attn_type == MT_MAP.full:
+            k_tile_end = cute.ceil_div(seqlen_k, block_info.tile_n)
         else:
-            assert mCuBatches is not None
-            row_start = Int32(mCuBatches[r])
-            row = row_start
-            row_end = Int32(mCuBatches[r + 1])
-            while row < row_end:
-                _record_row_blocks(
-                    mRanges,
-                    mConflict,
-                    slot,
-                    r,
-                    row,
-                    writer,
-                    block_size,
-                    rows_per_token,
-                    lane,
-                    block_writer=block_writer,
-                    monotonic_group_merge=const_expr(block_writer is not None),
-                    is_first_group_row=(row == row_start),
-                )
-                cute.arch.sync_warp()
-                row += 1
-        r += 1
-
-
-@cute.jit
-def _record_row_blocks(
-    mRanges: cute.Tensor,
-    mConflict: cute.Tensor,
-    slot: Int32,
-    group_idx: Int32,
-    row: Int32,
-    writer: Int32,
-    block_size: cutlass.Constexpr[int],
-    rows_per_token: cutlass.Constexpr[int],
-    lane: Int32,
-    block_writer: Optional[Callable[[Int32, Int32, Int32], Int32]] = None,
-    monotonic_group_merge: cutlass.Constexpr[bool] = False,
-    is_first_group_row: cutlass.Boolean = cutlass.Boolean(True),
-) -> None:
-    start = mRanges[row, 0] * rows_per_token
-    end = mRanges[row, 1] * rows_per_token
-    if const_expr(block_writer is None):
-        if end > start and writer != 0:
-            block = start // block_size + lane
-            last_block = (end - 1) // block_size
-            while block <= last_block:
-                record_conflict(mConflict, slot, block, writer)
-                block += cute.arch.WARP_SIZE
-    else:
-        assert block_writer is not None
-        if end > start:
-            block = start // block_size + lane
-            last_block = (end - 1) // block_size
-            while block <= last_block:
-                w = block_writer(group_idx, row, block)
-                if w != 0:
-                    if const_expr(monotonic_group_merge):
-                        if is_first_group_row or w > Int32(mConflict[slot, block]):
-                            record_conflict(mConflict, slot, block, w)
+            mt, mt_last = block_tiles(q_start, block, block_info.tile_m)
+            while mt <= mt_last:
+                if mt * block_info.tile_m < seqlen_q:
+                    if const_expr(use_per_range_mask):
+                        (
+                            n_lo,
+                            n_hi,
+                        ) = block_info.get_n_block_min_max_for_m_block_per_range_seqlens(
+                            seqlen_q, seqlen_k, mt, attn_type
+                        )
                     else:
-                        record_conflict(mConflict, slot, block, w)
-                block += cute.arch.WARP_SIZE
+                        (
+                            n_lo,
+                            n_hi,
+                        ) = block_info.get_n_block_min_max_for_m_block_seqlens(
+                            seqlen_q, seqlen_k, mt
+                        )
+                    if n_hi > n_lo:
+                        k_tile_end = cutlass.max(k_tile_end, n_hi)
+                mt += 1
+    return k_tile_end
 
 
 @cute.jit
-def rows_have_block(
-    mRanges: cute.Tensor,
-    row_from: Int32,
-    row_to: Int32,
+def dkv_pair_k_tile_is_active(
+    block_info: BlockInfo,
+    seqlen_q: Int32,
+    seqlen_k: Int32,
+    k_tile: Int32,
+    attn_type: Int32,
+    use_per_range_mask: cutlass.Constexpr[bool],
+) -> cutlass.Boolean:
+    """Whether a pair has an unmasked Q tile on its K tile ``k_tile``; a tile
+    outside the K range is inactive."""
+    active = cutlass.Boolean(False)
+    if seqlen_q > 0 and k_tile >= 0 and k_tile * block_info.tile_n < seqlen_k:
+        if const_expr(use_per_range_mask):
+            if attn_type == MT_MAP.full:
+                active = cutlass.Boolean(True)
+            else:
+                m_lo, m_hi = block_info.get_m_block_min_max_per_range_seqlens(
+                    seqlen_q, seqlen_k, k_tile, attn_type
+                )
+                if m_lo < m_hi:
+                    active = cutlass.Boolean(True)
+        elif const_expr(not block_info.is_causal and not block_info.is_local):
+            active = cutlass.Boolean(True)
+        else:
+            m_lo, m_hi = block_info.get_m_block_min_max_seqlens(
+                seqlen_q, seqlen_k, k_tile
+            )
+            if m_lo < m_hi:
+                active = cutlass.Boolean(True)
+    return active
+
+
+@cute.jit
+def dkv_pair_is_active_on_block(
+    block_info: BlockInfo,
+    seqlen_q: Int32,
+    seqlen_k: Int32,
+    k_start: Int32,
+    attn_type: Int32,
+    block: Int32,
+    use_per_range_mask: cutlass.Constexpr[bool],
+) -> cutlass.Boolean:
+    """Whether a pair has an active K tile that overlaps physical K ``block``."""
+    first, last = block_tiles(k_start, block, block_info.tile_n)
+    active = dkv_pair_k_tile_is_active(
+        block_info, seqlen_q, seqlen_k, last, attn_type, use_per_range_mask
+    )
+    if not active and first != last:
+        active = dkv_pair_k_tile_is_active(
+            block_info, seqlen_q, seqlen_k, first, attn_type, use_per_range_mask
+        )
+    return active
+
+
+@cute.jit
+def lookup_fwd_conflict(
+    mConflictCkpt: cute.Tensor,
+    mQRanges: cute.Tensor,
+    batch_idx: Int32,
     block: Int32,
     block_size: cutlass.Constexpr[int],
-) -> cutlass.Boolean:
-    found = cutlass.Boolean(False)
-    row = row_from
-    while row < row_to:
-        start = mRanges[row, 0]
-        end = mRanges[row, 1]
-        if end > start and start // block_size <= block:
-            if (end - 1) // block_size >= block:
+    rows_per_token: cutlass.Constexpr[int],
+    ckpt_stride: Int32,
+) -> Int32:
+    """Highest earlier fwd writer (r + 1) touching physical ``block``; 0 if none."""
+    c = batch_idx // ckpt_stride
+    pred = Int32(mConflictCkpt[c, block])
+    if ckpt_stride > 1:
+        r_lo = c * ckpt_stride
+        r = batch_idx - 1
+        found = cutlass.Boolean(False)
+        while r >= r_lo and not found:
+            s = mQRanges[r, 0] * rows_per_token
+            e = mQRanges[r, 1] * rows_per_token
+            if e > s and s // block_size <= block and (e - 1) // block_size >= block:
+                pred = r + 1
                 found = cutlass.Boolean(True)
-        row += 1
-    return found
-
-
-@cute.jit
-def record_conflict(
-    mConflict: cute.Tensor, slot: Int32, block: Int32, writer: Int32
-) -> None:
-    mConflict[slot, block] = writer
+            r -= 1
+    return pred
 
 
 @cute.jit

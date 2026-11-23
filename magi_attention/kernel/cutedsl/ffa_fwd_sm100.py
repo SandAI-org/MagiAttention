@@ -792,7 +792,8 @@ class FFAFwdSm100:
         mMaxLogits: Optional[cute.Tensor] = None,
         # tanh cap magnitude; required iff has_softcap.
         softcap: Float32 | None = None,
-        mConflictState: Optional[cute.Tensor] = None,
+        mConflictCkpt: Optional[cute.Tensor] = None,
+        conflict_ckpt_stride: Optional[Int32] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -832,8 +833,10 @@ class FFAFwdSm100:
             not self.disable_fwd_atomic_reduction
         ), "range locks required iff fwd atomic reduction is enabled"
         assert (
-            mConflictState is not None
-        ) == self.deterministic, "the conflict state comes with deterministic"
+            mConflictCkpt is not None and conflict_ckpt_stride is not None
+        ) == self.deterministic, (
+            "conflict checkpoints and stride are required iff deterministic"
+        )
         if const_expr(self.deterministic):
             assert mRangeLocks is not None and cute.rank(mRangeLocks) == 3
         assert (
@@ -1543,7 +1546,8 @@ class FFAFwdSm100:
             descale_tensors,
             mMaskTypes,
             mRangeLocks,
-            mConflictState,
+            mConflictCkpt,
+            conflict_ckpt_stride,
             mCuBatches,
             mMaxLogits,
             blocksparse_tensors,
@@ -1598,7 +1602,8 @@ class FFAFwdSm100:
         descale_tensors: Optional[DescaleTensors],
         mMaskTypes: Optional[cute.Tensor],
         mRangeLocks: Optional[cute.Tensor],
-        mConflictState: Optional[cute.Tensor],
+        mConflictCkpt: Optional[cute.Tensor],
+        conflict_ckpt_stride: Optional[Int32],
         mCuBatches: Optional[cute.Tensor],
         mMaxLogits: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
@@ -2464,7 +2469,8 @@ class FFAFwdSm100:
                 mCuBatches=mCuBatches,
                 mRangeLocks=mRangeLocks,
                 mQRanges=mQRanges,
-                mConflictState=mConflictState,
+                mConflictCkpt=mConflictCkpt,
+                conflict_ckpt_stride=conflict_ckpt_stride,
                 borrow_done_mbar_ptr=borrow_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
@@ -4527,7 +4533,8 @@ class FFAFwdSm100:
         mCuBatches: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
         mQRanges: Optional[cute.Tensor] = None,
-        mConflictState: Optional[cute.Tensor] = None,
+        mConflictCkpt: Optional[cute.Tensor] = None,
+        conflict_ckpt_stride: Optional[Int32] = None,
         borrow_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
@@ -4555,9 +4562,6 @@ class FFAFwdSm100:
         sm_stats_consumer_phase = Int32(0)
         o_corr_consumer_phase = Int32(0)
         corr_epi_producer_phase = Int32(1)
-        # chain_scanned advances monotonically with claimed tile batch_idx.
-        chain_slot = cute.arch.block_idx()[0]
-        chain_scanned = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -5012,37 +5016,41 @@ class FFAFwdSm100:
                         if tile_has_rows:
                             if const_expr(self.deterministic):
                                 assert mQRanges is not None
-                                assert mConflictState is not None
-                                if warp_idx == 0:
-                                    range_chain.scan_conflicts(
-                                        mQRanges,
-                                        mConflictState,
-                                        chain_slot,
-                                        chain_scanned,
-                                        batch_idx,
-                                        self.m_block_size,
-                                        last_writer=lambda r: r + 1,
-                                        rows_per_token=(
-                                            self.qhead_per_kvhead
-                                            if const_expr(self.pack_gqa)
-                                            else 1
-                                        ),
-                                    )
-                                chain_scanned = batch_idx
+                                assert mConflictCkpt is not None
+                                assert conflict_ckpt_stride is not None
                                 if tidx == 0:
+                                    rows_per_token = (
+                                        self.qhead_per_kvhead
+                                        if const_expr(self.pack_gqa)
+                                        else 1
+                                    )
                                     range_chain.wait_published(
                                         mRangeLocks,
                                         chain_left,
                                         head_idx,
-                                        Int32(mConflictState[chain_slot, chain_left]),
+                                        range_chain.lookup_fwd_conflict(
+                                            mConflictCkpt,
+                                            mQRanges,
+                                            batch_idx,
+                                            chain_left,
+                                            self.m_block_size,
+                                            rows_per_token,
+                                            conflict_ckpt_stride,
+                                        ),
                                     )
                                     if chain_right != chain_left:
                                         range_chain.wait_published(
                                             mRangeLocks,
                                             chain_right,
                                             head_idx,
-                                            Int32(
-                                                mConflictState[chain_slot, chain_right]
+                                            range_chain.lookup_fwd_conflict(
+                                                mConflictCkpt,
+                                                mQRanges,
+                                                batch_idx,
+                                                chain_right,
+                                                self.m_block_size,
+                                                rows_per_token,
+                                                conflict_ckpt_stride,
                                             ),
                                         )
                             elif tidx == 0:

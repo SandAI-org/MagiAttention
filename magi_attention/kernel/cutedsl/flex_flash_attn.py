@@ -27,6 +27,7 @@ from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.utils.dtype import to_cute_dtype
 
+from . import range_chain_ckpt
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import (
     get_aux_tensor_metadata,
@@ -113,6 +114,14 @@ def _apply_range_merge(
                 plan.unique_count,
                 "RangeMergePlan.unique_count",
                 (1,),
+                torch.int32,
+                outer_ranges.device,
+            )
+        if plan.row_group is not None:
+            validate_tensor(
+                plan.row_group,
+                "RangeMergePlan.row_group",
+                (outer_ranges.shape[0],),
                 torch.int32,
                 outer_ranges.device,
             )
@@ -638,7 +647,8 @@ def _flex_flash_attn_fwd(
         aux_tensor_metadata = None
 
     range_locks = None
-    conflict_state = None
+    conflict_ckpt = None
+    conflict_ckpt_stride: int | None = None
     if not disable_fwd_atomic_reduction:
         # One int32 lock per (tile_m rows, head) of the layout the kernel
         # tiles (packed rows and kv heads under pack_gqa); +1 guard tile.
@@ -652,12 +662,17 @@ def _flex_flash_attn_fwd(
             device=device,
         )
         if fwd_deterministic:
-            num_slots = (
-                torch.cuda.get_device_properties(device).multi_processor_count
-                - sm_margin
-            )
-            conflict_state = torch.zeros(
-                num_slots, num_lock_blocks, dtype=torch.int32, device=device
+            assert q_ranges is not None
+            num_sm = torch.cuda.get_device_properties(device).multi_processor_count
+            (
+                conflict_ckpt,
+                conflict_ckpt_stride,
+            ) = range_chain_ckpt.build_fwd_conflict_ckpt(
+                q_ranges,
+                num_lock_blocks,
+                num_sm,
+                tile_m,
+                qhead_per_kvhead if pack_gqa else 1,
             )
     # The DYNAMIC schedule's tile counter.
     tile_counter = (
@@ -891,8 +906,13 @@ def _flex_flash_attn_fwd(
             )
             compile_args.append(Float32(softcap) if softcap is not None else None)
             compile_args.append(
-                to_cute_tensor(conflict_state, assumed_align=4)
-                if conflict_state is not None
+                to_cute_tensor(conflict_ckpt, assumed_align=4)
+                if conflict_ckpt is not None
+                else None
+            )
+            compile_args.append(
+                Int32(conflict_ckpt_stride)
+                if conflict_ckpt_stride is not None
                 else None
             )
         compile_args.extend(
@@ -936,7 +956,8 @@ def _flex_flash_attn_fwd(
         call_args.append(tile_counter)
         call_args.append(max_logits)
         call_args.append(softcap)
-        call_args.append(conflict_state)
+        call_args.append(conflict_ckpt)
+        call_args.append(conflict_ckpt_stride)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
@@ -1344,7 +1365,7 @@ def _flex_flash_attn_bwd(
             raise NotImplementedError(
                 "deterministic q/k ranges cannot be combined with block sparsity"
             )
-        dkv_writer_stride = 1 if cat_gqa else qhead_per_kvhead
+        dkv_writer_stride = 1 if gqa_fold.covers_all_qheads else gqa_fold.kv_group
         cluster_tile_k = n_block_size * cluster_size
         max_k_tiles = (seqlen_k + cluster_tile_k - 1) // cluster_tile_k
         if not use_dense_dqacc_for_ranges:
@@ -1615,23 +1636,72 @@ def _flex_flash_attn_bwd(
         )
     else:
         dQ_semaphore = None
-    dq_chain_state = dq_conflict = None
+    row_group_tensor = None
+    if range_deterministic and range_merge_active:
+        assert (
+            k_merge is not None
+            and cu_batches is not None
+            and q_ranges is not None
+            and k_ranges is not None
+        )
+        if k_merge.row_group is not None:
+            row_group_tensor = k_merge.row_group
+        else:
+            group = torch.arange(k_ranges.shape[0], dtype=torch.int64, device=device)
+            row_count = cu_batches[1:].to(torch.int64) - cu_batches[:-1].to(torch.int64)
+            row_group_tensor = torch.repeat_interleave(
+                group, row_count, output_size=q_ranges.shape[0]
+            ).to(torch.int32)
+    if range_deterministic:
+        bwd_ckpt_spec = range_chain_ckpt.BwdCkptSpec(
+            tile_m=m_block_size,
+            cluster_tile_k=cluster_tile_k,
+            mask_type=mask_type,
+            range_merge=range_merge_active,
+        )
+    dq_chain_state = dq_conflict_ckpt = None
+    dq_ckpt_stride: int | None = None
     if range_deterministic and not use_dense_dqacc_for_ranges:
+        assert (
+            q_ranges is not None
+            and k_ranges is not None
+            and dq_writer_stride is not None
+        )
         num_q_blocks = (total_q + m_block_size - 1) // m_block_size + 1
         dq_chain_state = torch.zeros(
             num_q_blocks, num_head, 2, dtype=torch.int32, device=device
         )
-        dq_conflict = torch.zeros(
-            num_sm - sm_margin, num_q_blocks, dtype=torch.int32, device=device
+        dq_conflict_ckpt, dq_ckpt_stride = range_chain_ckpt.build_bwd_dq_conflict_ckpt(
+            bwd_ckpt_spec,
+            q_ranges,
+            k_ranges,
+            mask_types_tensor,
+            row_group_tensor,
+            num_q_blocks,
+            num_sm,
+            dq_writer_stride,
         )
-    dkv_chain_state = dkv_conflict = None
+    dkv_chain_state = dkv_conflict_ckpt = dkv_group_all_k_active = None
+    dkv_ckpt_stride: int | None = None
     if range_deterministic and not direct_dkv:
+        assert q_ranges is not None and k_ranges is not None
         num_k_blocks = (total_k + cluster_tile_k - 1) // cluster_tile_k + 1
         dkv_chain_state = torch.zeros(
             num_k_blocks, num_head_kv, 2, dtype=torch.int32, device=device
         )
-        dkv_conflict = torch.zeros(
-            num_sm - sm_margin, num_k_blocks, dtype=torch.int32, device=device
+        (
+            dkv_conflict_ckpt,
+            dkv_ckpt_stride,
+            dkv_group_all_k_active,
+        ) = range_chain_ckpt.build_bwd_dkv_conflict_ckpt_and_all_k_active(
+            bwd_ckpt_spec,
+            q_ranges,
+            k_ranges,
+            mask_types_tensor,
+            row_group_tensor,
+            num_k_blocks,
+            num_sm,
+            dkv_writer_stride,
         )
 
     # The DYNAMIC schedule's tile counter.
@@ -1976,17 +2046,28 @@ def _flex_flash_attn_bwd(
             bwd_compile_args.extend(
                 [
                     (to_cute_tensor(t, assumed_align=4) if t is not None else None)
-                    for t in (dq_chain_state, dq_conflict)
+                    for t in (dq_chain_state, dq_conflict_ckpt)
                 ]
             )
             bwd_compile_args.append(
                 Int32(dq_writer_stride) if dq_writer_stride is not None else None
             )
+            bwd_compile_args.append(
+                Int32(dq_ckpt_stride) if dq_ckpt_stride is not None else None
+            )
             bwd_compile_args.extend(
                 [
                     (to_cute_tensor(t, assumed_align=4) if t is not None else None)
-                    for t in (dkv_chain_state, dkv_conflict)
+                    for t in (dkv_chain_state, dkv_conflict_ckpt)
                 ]
+            )
+            bwd_compile_args.append(
+                Int32(dkv_ckpt_stride) if dkv_ckpt_stride is not None else None
+            )
+            bwd_compile_args.append(
+                to_cute_tensor(dkv_group_all_k_active, assumed_align=1, leading_dim=0)
+                if dkv_group_all_k_active is not None
+                else None
             )
         bwd_compile_args.extend(
             [
@@ -2029,10 +2110,13 @@ def _flex_flash_attn_bwd(
         bwd_call_args.append(tile_counter)
         bwd_call_args.append(softcap_value)
         bwd_call_args.append(dq_chain_state)
-        bwd_call_args.append(dq_conflict)
+        bwd_call_args.append(dq_conflict_ckpt)
         bwd_call_args.append(dq_writer_stride)
+        bwd_call_args.append(dq_ckpt_stride)
         bwd_call_args.append(dkv_chain_state)
-        bwd_call_args.append(dkv_conflict)
+        bwd_call_args.append(dkv_conflict_ckpt)
+        bwd_call_args.append(dkv_ckpt_stride)
+        bwd_call_args.append(dkv_group_all_k_active)
     bwd_call_args.extend(
         [
             aux_tensors,

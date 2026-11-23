@@ -46,6 +46,7 @@ class RangeMergePlan:
     cu_batches: torch.Tensor  # [R + 1] CSR
     merged_outer_ranges_by_start: torch.Tensor  # [R, 2], start ascending + INT32_MAX tail
     unique_count: torch.Tensor | None = None  # [1] int32 active group count G
+    row_group: torch.Tensor | None = None  # [R] int32 launch-order group per row
     bwd: "RangeMergePlan | None" = None  # K-merge; None => rebuild in bwd
 
 
@@ -108,6 +109,7 @@ def merge_qk_ranges(
             cu_batches=q_ranges.new_zeros(1),
             merged_outer_ranges_by_start=q_ranges,
             unique_count=q_ranges.new_zeros(1),
+            row_group=q_ranges.new_empty(0, dtype=torch.int32),
         )
 
     pair_key = (q_ranges[:, 0].to(torch.int64) << 32) + (
@@ -150,6 +152,7 @@ def merge_qk_ranges(
         cu_batches=new_cu_batches.to(cu_batches.dtype),
         merged_outer_ranges_by_start=by_start,
         unique_count=unique_count,
+        row_group=row_group.to(torch.int32),
     )
 
 

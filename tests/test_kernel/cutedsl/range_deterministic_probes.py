@@ -74,21 +74,6 @@ def odd_block_sleep(seed: int, max_ns: int, *, loc=None, ip=None) -> None:
 
 
 @dsl_user_op
-def odd_lane_sleep(ns: int, *, loc=None, ip=None) -> None:
-    _asm(
-        "{\n\t.reg .u32 t;\n\t.reg .pred p;\n\t"
-        "mov.u32 t, %laneid;\n\t"
-        "and.b32 t, t, 1;\n\t"
-        "setp.ne.u32 p, t, 0;\n\t"
-        f"@p nanosleep.u32 {ns};\n\t}}",
-        "",
-        [],
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
 def launch_order_sleep(step_ns: int, *, loc=None, ip=None) -> None:
     _asm(
         "{\n\t.reg .u32 a, b;\n\t"
@@ -191,20 +176,6 @@ def delay_injection(point: DelayPoint, seed: int, max_ns: int) -> Iterator[None]
             mock.patch.object(range_chain, "wait_published", delayed_wait_published)
         )
     with stack:
-        yield
-
-
-@contextmanager
-def odd_lane_conflict_records(ns: int) -> Iterator[None]:
-    record = range_chain.record_conflict
-
-    def delayed_record(mConflict, slot, block, writer):
-        odd_lane_sleep(ns)
-        record(mConflict, slot, block, writer)
-
-    with fresh_compile_caches(), mock.patch.object(
-        range_chain, "record_conflict", delayed_record
-    ):
         yield
 
 

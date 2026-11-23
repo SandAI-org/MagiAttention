@@ -24,7 +24,7 @@ from cutlass import Int32
 from cutlass.cute.runtime import from_dlpack
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.kernel.cutedsl import flex_flash_attn_func, range_chain
+from magi_attention.kernel.cutedsl import flex_flash_attn_func, range_chain_ckpt
 from magi_attention.kernel.cutedsl.block_info import BlockInfo
 from magi_attention.kernel.cutedsl.cache_utils import JITCache
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
@@ -42,7 +42,6 @@ from magi_attention.testing.cutedsl_utils import record_bwd_kernels, record_fwd_
 from tests.test_kernel.cutedsl.range_deterministic_probes import (
     DelayPoint,
     delay_injection,
-    odd_lane_conflict_records,
     record_visits,
 )
 
@@ -1413,91 +1412,450 @@ class TestFFARangePersistentGrid(TestCase):
         self.assertEqual(built, [])
 
 
-class _ScanConflictsLauncher:
-    def __init__(self, block_size: int, rows_per_token: int):
-        self.block_size = block_size
-        self.rows_per_token = rows_per_token
-
-    @cute.jit
-    def __call__(
-        self,
-        mRanges: cute.Tensor,
-        mConflict: cute.Tensor,
-        num_ranges: Int32,
-        stream: cuda.CUstream,
-    ):
-        self.kernel(mRanges, mConflict, num_ranges).launch(
-            grid=(1, 1, 1), block=(cute.arch.WARP_SIZE, 1, 1), stream=stream
-        )
-
-    @cute.kernel
-    def kernel(self, mRanges: cute.Tensor, mConflict: cute.Tensor, num_ranges: Int32):
-        range_chain.scan_conflicts(
-            mRanges,
-            mConflict,
-            Int32(0),
-            Int32(0),
-            num_ranges,
-            self.block_size,
-            last_writer=lambda r: r + 1,
-            rows_per_token=self.rows_per_token,
-        )
+def _ref_m_bounds_per_range(
+    seqlen_q: int, seqlen_k: int, n_block: int, tile_m: int, tile_n: int, attn: int
+) -> tuple[int, int]:
+    if seqlen_q <= 0 or seqlen_k <= 0:
+        return 0, 0
+    if n_block < 0 or n_block >= math.ceil(seqlen_k / tile_n):
+        return 0, 0
+    m_min = 0
+    m_max = math.ceil(seqlen_q / tile_m)
+    if attn in (MT_MAP.inv_causal, MT_MAP.bi_causal):
+        m_max = min(m_max, math.ceil(min(seqlen_k, (n_block + 1) * tile_n) / tile_m))
+    if attn in (MT_MAP.causal, MT_MAP.bi_causal):
+        m_idx_right = n_block * tile_n + seqlen_q - seqlen_k
+        if m_idx_right > 0:
+            m_min = min(m_max, m_idx_right // tile_m)
+    return m_min, m_max
 
 
-class TestFFARangeChainScan(TestCase):
+def _ref_dq_pair_k_tile_end_on_block(
+    seqlen_q: int,
+    seqlen_k: int,
+    q_start: int,
+    block: int,
+    tile_m: int,
+    tile_n: int,
+    attn: int,
+) -> int:
+    if seqlen_q <= 0 or seqlen_k <= 0:
+        return 0
+    n_upper = math.ceil(seqlen_k / tile_n)
+    b0 = q_start // tile_m
+    mt_lo = block - b0 - 1 if (q_start % tile_m) != 0 and block > b0 else block - b0
+    mt_hi = block - b0
+    k_tile_end = 0
+    for mt in range(mt_lo, mt_hi + 1):
+        if mt * tile_m >= seqlen_q:
+            continue
+        for n in range(n_upper):
+            m_lo, m_hi = _ref_m_bounds_per_range(
+                seqlen_q, seqlen_k, n, tile_m, tile_n, attn
+            )
+            if m_lo <= mt < m_hi:
+                k_tile_end = max(k_tile_end, n + 1)
+    return k_tile_end
+
+
+_CKPT_MASKS = [MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal]
+_CKPT_ONE_RANGE: Relations = [([0, 64], [0, 64], MT_MAP.full)]
+
+
+class TestFFARangeConflictCkpt(TestCase):
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("the range chain runs on SM100/SM110")
+        torch.manual_seed(42)
+        self.num_sm = torch.cuda.get_device_properties(0).multi_processor_count
 
-    def _scan(
-        self, ranges: list[list[int]], block_size: int, rows_per_token: int = 1
-    ) -> torch.Tensor:
-        num_blocks = max(e for _, e in ranges) * rows_per_token // block_size + 2
-        mranges = torch.tensor(ranges, dtype=torch.int32, device="cuda")
-        conflict = torch.zeros(1, num_blocks, dtype=torch.int32, device="cuda")
-        args = (
-            from_dlpack(mranges),
-            from_dlpack(conflict),
-            Int32(len(ranges)),
-            cuda.CUstream(torch.cuda.current_stream().cuda_stream),
-        )
-        launcher = _ScanConflictsLauncher(block_size, rows_per_token)
-        cute.compile(launcher, *args)(*args)
-        torch.cuda.synchronize()
-        return conflict[0].cpu()
-
-    @parameterize(
-        "ranges",
-        [
-            [[0, 256], [128, 256]],
-            [[5, 300], [130, 140], [0, 129]],
-            [[0, 40 * 128], [33 * 128 + 7, 35 * 128]],
-            [[0, 384], [200, 200], [129, 384]],
-        ],
-    )
-    def test_scan_keeps_the_last_range_per_block_under_delayed_lanes(self, ranges):
+    @parameterize("num_sm", [1, 2, 16])
+    def test_fwd_conflict_ckpt_matches_reference(self, num_sm: int):
         block_size = 128
-        want = torch.zeros(
-            max(e for _, e in ranges) // block_size + 2, dtype=torch.int32
+        ranges = [
+            [0, 256],
+            [128, 256],
+            [5, 300],
+            [130, 140],
+            [0, 129],
+            [0, 40 * 128],
+            [33 * 128 + 7, 35 * 128],
+            [200, 200],
+            [129, 384],
+        ]
+        num_blocks = max(e for _, e in ranges) // block_size + 2
+        q_ranges = torch.tensor(ranges, dtype=torch.int32, device="cuda")
+        ckpt, ckpt_stride = range_chain_ckpt.build_fwd_conflict_ckpt(
+            q_ranges, num_blocks, num_sm, block_size, rows_per_token=1
         )
-        for r, (start, end) in enumerate(ranges):
-            if end > start:
-                want[start // block_size : (end - 1) // block_size + 1] = r + 1
-        self.assertTrue(torch.equal(self._scan(ranges, block_size), want))
-        with odd_lane_conflict_records(50_000):
-            got = self._scan(ranges, block_size)
-        self.assertTrue(torch.equal(got, want), f"{got.tolist()} != {want.tolist()}")
+        num_ckpts, want_stride = range_chain_ckpt.conflict_ckpt_shape(
+            len(ranges), num_sm
+        )
+        self.assertEqual(ckpt_stride, want_stride)
+        self.assertEqual(tuple(ckpt.shape), (num_ckpts, num_blocks))
+
+        want = torch.zeros(num_ckpts, num_blocks, dtype=torch.int32)
+        running = torch.zeros(num_blocks, dtype=torch.int32)
+        for c in range(num_ckpts):
+            want[c] = running
+            r_lo = c * ckpt_stride
+            r_hi = min(len(ranges), r_lo + ckpt_stride)
+            for r in range(r_lo, r_hi):
+                s, e = ranges[r]
+                if e > s:
+                    running[s // block_size : (e - 1) // block_size + 1] = r + 1
+        self.assertTrue(torch.equal(ckpt.cpu(), want))
 
     @parameterize("rows_per_token", [2, 4])
-    def test_scan_scales_token_ranges_to_packed_row_blocks(self, rows_per_token):
+    def test_fwd_conflict_ckpt_scales_packed_row_blocks(self, rows_per_token: int):
         block_size, g = 128, rows_per_token
-        ranges = [[61, 100], [32, 64], [0, 33], [70, 70], [90, 130]]
-        want = torch.zeros(130 * g // block_size + 2, dtype=torch.int32)
-        for r, (start, end) in enumerate(ranges):
-            if end > start:
-                want[start * g // block_size : (end * g - 1) // block_size + 1] = r + 1
-        got = self._scan(ranges, block_size, rows_per_token=g)
-        self.assertTrue(torch.equal(got, want), f"{got.tolist()} != {want.tolist()}")
+        ranges = [[61, 100], [32, 64], [0, 33], [70, 70], [90, 130], [10, 80]]
+        num_blocks = 130 * g // block_size + 2
+        q_ranges = torch.tensor(ranges, dtype=torch.int32, device="cuda")
+        for num_sm in (2, 16):
+            ckpt, ckpt_stride = range_chain_ckpt.build_fwd_conflict_ckpt(
+                q_ranges, num_blocks, num_sm, block_size, rows_per_token=g
+            )
+            num_ckpts, _ = range_chain_ckpt.conflict_ckpt_shape(len(ranges), num_sm)
+            want = torch.zeros(num_ckpts, num_blocks, dtype=torch.int32)
+            running = torch.zeros(num_blocks, dtype=torch.int32)
+            for c in range(num_ckpts):
+                want[c] = running
+                for r in range(
+                    c * ckpt_stride, min(len(ranges), (c + 1) * ckpt_stride)
+                ):
+                    s, e = ranges[r]
+                    if e > s:
+                        running[s * g // block_size : (e * g - 1) // block_size + 1] = (
+                            r + 1
+                        )
+            self.assertTrue(torch.equal(ckpt.cpu(), want))
+
+    @parameterize(
+        "case",
+        [
+            (False, None),
+            (False, MT_MAP.full),
+            (False, MT_MAP.causal),
+            (True, None),
+        ],
+    )
+    @parameterize("num_sm", [2, 16])
+    def test_bwd_dq_and_dkv_conflict_ckpt_match_reference(self, case, num_sm: int):
+        range_merge, mask_type = case
+        tile_m, cluster_tile_k = 128, 256
+        if not range_merge:
+            q_list = [
+                [0, 300],
+                [64, 512],
+                [10, 10],
+                [200, 600],
+                [0, 130],
+                [350, 700],
+            ]
+            k_list = [
+                [0, 512],
+                [100, 300],
+                [0, 256],
+                [256, 768],
+                [128, 384],
+                [50, 150],
+            ]
+            masks = [
+                MT_MAP.full,
+                MT_MAP.bi_causal,
+                MT_MAP.causal,
+                MT_MAP.causal,
+                MT_MAP.inv_causal,
+                MT_MAP.bi_causal,
+            ]
+            row_group = None
+            group_of = list(range(len(q_list)))
+            num_groups = len(k_list)
+        else:
+            k_list = [[0, 512], [100, 300], [256, 768], [50, 150], [400, 500]]
+            q_list = [
+                [0, 300],
+                [200, 600],
+                [0, 512],
+                [10, 10],
+                [64, 400],
+                [0, 520],
+                [128, 640],
+            ]
+            masks = [
+                MT_MAP.causal,
+                MT_MAP.full,
+                MT_MAP.bi_causal,
+                MT_MAP.full,
+                MT_MAP.inv_causal,
+                MT_MAP.bi_causal,
+                MT_MAP.bi_causal,
+            ]
+            group_of = [0, 0, 1, 2, 2, 3, 4]
+            row_group = torch.tensor(group_of, dtype=torch.int32, device="cuda")
+            num_groups = len(k_list)
+
+        mask_t = None
+        if mask_type is None:
+            mask_t = torch.tensor(masks, dtype=torch.int32, device="cuda")
+        else:
+            masks = [mask_type] * len(masks)
+        q_ranges = torch.tensor(q_list, dtype=torch.int32, device="cuda")
+        k_ranges = torch.tensor(k_list, dtype=torch.int32, device="cuda")
+        num_q_blocks = max(e for _, e in q_list) // tile_m + 2
+        num_k_blocks = max(e for _, e in k_list) // cluster_tile_k + 2
+        dq_stride = 8
+        dkv_stride = 4
+
+        spec = range_chain_ckpt.BwdCkptSpec(
+            tile_m=tile_m,
+            cluster_tile_k=cluster_tile_k,
+            mask_type=mask_type,
+            range_merge=range_merge,
+        )
+        dq_ckpt, dq_ckpt_stride = range_chain_ckpt.build_bwd_dq_conflict_ckpt(
+            spec,
+            q_ranges,
+            k_ranges,
+            mask_t,
+            row_group,
+            num_q_blocks,
+            num_sm,
+            dq_stride,
+        )
+        (
+            dkv_ckpt,
+            dkv_ckpt_stride,
+            all_k_active,
+        ) = range_chain_ckpt.build_bwd_dkv_conflict_ckpt_and_all_k_active(
+            spec,
+            q_ranges,
+            k_ranges,
+            mask_t,
+            row_group,
+            num_k_blocks,
+            num_sm,
+            dkv_stride,
+        )
+
+        num_ckpts, want_stride = range_chain_ckpt.conflict_ckpt_shape(
+            num_groups, num_sm
+        )
+        self.assertEqual(dq_ckpt_stride, want_stride)
+        self.assertEqual(dkv_ckpt_stride, want_stride)
+
+        want_dq = torch.zeros(num_ckpts, num_q_blocks, dtype=torch.int32)
+        want_dkv = torch.zeros(num_ckpts, num_k_blocks, dtype=torch.int32)
+        run_dq = torch.zeros(num_q_blocks, dtype=torch.int32)
+        run_dkv = torch.zeros(num_k_blocks, dtype=torch.int32)
+        want_all_k = torch.zeros(num_groups, dtype=torch.uint8)
+
+        for c in range(num_ckpts):
+            want_dq[c] = run_dq
+            want_dkv[c] = run_dkv
+            g_lo = c * want_stride
+            g_hi = min(num_groups, g_lo + want_stride)
+            for row, g in enumerate(group_of):
+                qs, qe = q_list[row]
+                ks, ke = k_list[g]
+                sq, sk = qe - qs, ke - ks
+                if sq <= 0 or sk <= 0:
+                    continue
+                attn = masks[row]
+                if attn != MT_MAP.bi_causal or sq <= sk:
+                    want_all_k[g] = 1
+                if not (g_lo <= g < g_hi):
+                    continue
+                for b in range(qs // tile_m, (qe - 1) // tile_m + 1):
+                    k_tile_end = _ref_dq_pair_k_tile_end_on_block(
+                        sq, sk, qs, b, tile_m, cluster_tile_k, attn
+                    )
+                    if k_tile_end > 0:
+                        run_dq[b] = max(int(run_dq[b]), g * dq_stride + k_tile_end)
+                kb0 = ks // cluster_tile_k
+                for kb in range(kb0, (ke - 1) // cluster_tile_k + 1):
+                    active = False
+                    if (ks % cluster_tile_k) != 0 and kb > kb0:
+                        lo, hi = _ref_m_bounds_per_range(
+                            sq, sk, kb - kb0 - 1, tile_m, cluster_tile_k, attn
+                        )
+                        active = active or (lo < hi)
+                    n_b = kb - kb0
+                    if n_b * cluster_tile_k < sk:
+                        lo, hi = _ref_m_bounds_per_range(
+                            sq, sk, n_b, tile_m, cluster_tile_k, attn
+                        )
+                        active = active or (lo < hi)
+                    if active:
+                        run_dkv[kb] = max(int(run_dkv[kb]), (g + 1) * dkv_stride)
+
+        self.assertTrue(torch.equal(dq_ckpt.cpu(), want_dq))
+        self.assertTrue(torch.equal(dkv_ckpt.cpu(), want_dkv))
+        if range_merge:
+            self.assertIsNotNone(all_k_active)
+            assert all_k_active is not None
+            self.assertTrue(torch.equal(all_k_active.cpu(), want_all_k))
+            # Groups 1, 3, 4 have only bi_causal pairs with seqlen_q > seqlen_k.
+            self.assertEqual(all_k_active.cpu().tolist(), [1, 0, 1, 0, 0])
+        else:
+            self.assertIsNone(all_k_active)
+
+    def _many_ranges(self) -> int:
+        """A range count for which one checkpoint row covers several ranges."""
+        num_ranges = self.num_sm + 64
+        _, ckpt_stride = range_chain_ckpt.conflict_ckpt_shape(num_ranges, self.num_sm)
+        self.assertGreater(ckpt_stride, 1)
+        return num_ranges
+
+    @staticmethod
+    def _overlapping_q_disjoint_k_relations(
+        num_ranges: int,
+    ) -> tuple[Relations, int, int]:
+        q_len, k_step, total_q = 48, 32, 256
+        relations: Relations = [
+            (
+                [(g * 19) % (total_q - q_len), (g * 19) % (total_q - q_len) + q_len],
+                [g * k_step, (g + 1) * k_step],
+                _CKPT_MASKS[g % len(_CKPT_MASKS)],
+            )
+            for g in range(num_ranges)
+        ]
+        return relations, total_q, num_ranges * k_step + 32
+
+    @staticmethod
+    def _det_fwd(q, k, v, relations: Relations):
+        return _flex_flash_attn_fwd(
+            q,
+            k,
+            v,
+            **_range_args(relations),
+            disable_fwd_atomic_reduction=False,
+            deterministic=True,
+        )
+
+    @staticmethod
+    def _det_bwd(q, k, v, out, lse, do, relations: Relations, **kwargs):
+        return _flex_flash_attn_bwd(
+            q,
+            k,
+            v,
+            out.to(q.dtype),
+            lse,
+            do,
+            **_range_args(relations),
+            deterministic=True,
+            **kwargs,
+        )[:3]
+
+    def test_fwd_with_more_ranges_than_ckpts_bitwise(self):
+        relations, total_q, total_k = self._overlapping_q_disjoint_k_relations(
+            self._many_ranges()
+        )
+        q, k, v = _qkv(total_q, total_k, group=1, num_head_kv=1)
+        with record_fwd_kernels() as built:
+            self._det_fwd(q, k, v, _CKPT_ONE_RANGE)
+            first = self._det_fwd(q, k, v, relations)
+        # One compiled kernel reads a one-row and a many-row mConflictCkpt.
+        (kernel,) = built
+        self.assertTrue(kernel.deterministic)
+        _assert_bitwise_equal(self._det_fwd(q, k, v, relations), first)
+        out_ref, _, _ = _ref_fwd(q, k, v, relations)
+        torch.testing.assert_close(first[0], out_ref, atol=_TOL, rtol=_TOL)
+
+    def test_bwd_dq_and_dkv_chains_with_more_ranges_than_ckpts_bitwise(self):
+        relations, total_q, total_k = self._overlapping_q_disjoint_k_relations(
+            self._many_ranges()
+        )
+        q, k, v = _qkv(total_q, total_k, group=1, num_head_kv=1)
+        out, lse = self._det_fwd(q, k, v, relations)
+        do = torch.randn_like(q)
+
+        def bwd(relations: Relations):
+            return self._det_bwd(
+                q, k, v, out, lse, do, relations, disable_bwd_dkv_atomic_reduction=False
+            )
+
+        env = {"MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA": "0"}
+        with mock.patch.dict("os.environ", env):
+            with record_bwd_kernels() as built:
+                bwd(_CKPT_ONE_RANGE)
+                first = bwd(relations)
+            # One compiled kernel reads a one-row and a many-row mConflictCkpt.
+            (kernel,) = built
+            self.assertTrue(kernel.range_dq_chain and kernel.range_dkv_chain)
+            self.assertFalse(kernel.range_merge)
+            _assert_bitwise_equal(bwd(relations), first)
+        _assert_grads_close(first, _ref_grads(q, k, v, do, relations))
+
+    def test_bwd_range_merge_with_more_groups_than_ckpts_bitwise(self):
+        num_groups = self._many_ranges()
+        k_step, total_q = 32, 256
+        relations: Relations = []
+        for g in range(num_groups):
+            k_range = [g * k_step, (g + 1) * k_step]
+            q0 = (g * 17) % 128
+            relations.append(
+                ([q0, q0 + 40], k_range, _CKPT_MASKS[g % len(_CKPT_MASKS)])
+            )
+            relations.append(([q0 + 64, q0 + 112], k_range, MT_MAP.causal))
+        q, k, v = _qkv(total_q, num_groups * k_step + 32, group=1, num_head_kv=1)
+        out, lse = self._det_fwd(q, k, v, relations)
+        do = torch.randn_like(q)
+        args = _range_args(relations)
+        plan = plan_range_merge_bwd(
+            args["q_ranges"], args["k_ranges"], args["mask_types"]
+        )
+
+        def merge_bwd():
+            return self._det_bwd(
+                q,
+                k,
+                v,
+                out,
+                lse,
+                do,
+                relations,
+                disable_bwd_dkv_atomic_reduction=True,
+                range_merge=plan,
+            )
+
+        with record_bwd_kernels() as built:
+            first = merge_bwd()
+        (kernel,) = built
+        self.assertTrue(kernel.range_merge and kernel.range_dq_chain)
+        self.assertFalse(kernel.range_dkv_chain)
+        _assert_bitwise_equal(merge_bwd(), first)
+        _assert_grads_close(first, _ref_grads(q, k, v, do, relations))
+
+    def test_bwd_dkv_chain_with_more_overlapping_k_ranges_than_ckpts_bitwise(self):
+        num_ranges = self._many_ranges()
+        q_len, k_len, total_k = 16, 48, 256
+        relations: Relations = [
+            (
+                [g * q_len, (g + 1) * q_len],
+                [(g * 13) % (total_k - k_len), (g * 13) % (total_k - k_len) + k_len],
+                _CKPT_MASKS[g % len(_CKPT_MASKS)],
+            )
+            for g in range(num_ranges)
+        ]
+        q, k, v = _qkv(num_ranges * q_len, total_k, group=1, num_head_kv=1)
+        out, lse = _flex_flash_attn_fwd(
+            q, k, v, **_range_args(relations), disable_fwd_atomic_reduction=True
+        )
+        do = torch.randn_like(q)
+
+        def bwd():
+            return self._det_bwd(
+                q, k, v, out, lse, do, relations, disable_bwd_dkv_atomic_reduction=False
+            )
+
+        with record_bwd_kernels() as built:
+            first = bwd()
+        (kernel,) = built
+        self.assertTrue(kernel.range_dkv_chain)
+        _assert_bitwise_equal(bwd(), first)
+        _assert_grads_close(first, _ref_grads(q, k, v, do, relations))
 
 
 _FWD_UNIT_CLUSTERS = 8
