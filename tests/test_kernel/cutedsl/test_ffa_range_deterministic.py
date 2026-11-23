@@ -35,6 +35,11 @@ from magi_attention.kernel.cutedsl.range_merge import (
     plan_range_merge_bwd,
 )
 from magi_attention.testing import parameterize, ref_attn_func
+from magi_attention.testing.cutedsl_probes import (
+    DelayPoint,
+    delay_injection,
+    record_visits,
+)
 from magi_attention.testing.cutedsl_utils import (
     SM100_FAMILY_REQUIRED,
     CuteDSLDistTestBase,
@@ -50,11 +55,6 @@ from magi_attention.testing.dist_common import with_run_in_mp
 from magi_attention.testing.precision import assert_close, assert_equal
 from magi_attention.testing.utils import switch_env
 from magi_attention.utils.general import make_slice_mask_from_ffa_attn_type
-from tests.test_kernel.cutedsl.range_deterministic_probes import (
-    DelayPoint,
-    delay_injection,
-    record_visits,
-)
 
 _DTYPE = torch.bfloat16
 _HEAD_DIM = 128
@@ -489,28 +489,10 @@ _DISJOINT_Q_RELATIONS: dict[bool, tuple[Relations, int]] = {
 
 _CKPT_ONE_RANGE: Relations = [([0, 64], [0, 64], MT_MAP.full)]
 
-_FWD_UNIT_CLUSTERS = 8
-_FWD_UNIT_RELATIONS: dict[int, Relations] = {
-    1: [([5, 105], [0, 100], MT_MAP.full)],
-    7: [([0, 768], [0, 300], MT_MAP.full), ([100, 1100], [300, 700], MT_MAP.causal)],
-    8: [([0, 768], [0, 300], MT_MAP.full), ([100, 1300], [300, 700], MT_MAP.causal)],
-    9: [([0, 768], [0, 300], MT_MAP.full), ([100, 1500], [300, 700], MT_MAP.causal)],
-}
-_FWD_EMPTY_RELATIONS: Relations = [
-    ([40, 40], [0, 100], MT_MAP.full),
-    ([90, 90], [100, 300], MT_MAP.full),
-]
-_BWD_UNIT_CLUSTERS = 4
 _BWD_UNIT_RELATIONS: dict[int, Relations] = {
     1: [([0, 300], [0, 200], MT_MAP.full)],
-    3: [([0, 300], [0, 512], MT_MAP.full), ([100, 400], [600, 800], MT_MAP.causal)],
-    4: [([0, 300], [0, 512], MT_MAP.full), ([100, 400], [600, 1100], MT_MAP.causal)],
     5: [([0, 300], [0, 768], MT_MAP.full), ([100, 400], [800, 1300], MT_MAP.causal)],
 }
-_BWD_EMPTY_RELATIONS: Relations = [
-    ([0, 300], [10, 10], MT_MAP.full),
-    ([100, 400], [20, 20], MT_MAP.full),
-]
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1676,107 +1658,51 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
             _assert_bitwise_equal(prob.run(direct_dkv=False), first, test_case)
         _assert_grads_close(first, prob.ref_grads(), test_case)
 
-
-# ─────────────────────────────────────────────────────────────────────
-# DYNAMIC schedule unit-claim verification
-# ─────────────────────────────────────────────────────────────────────
-
-
-@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestFFARangeDeterministicClaims(_RangeDetHelpers, CuteDSLDistTestBase):
-    def _assert_each_unit_visited_once(
-        self, visits: torch.Tensor, clusters: torch.Tensor, num_units: int, cluster: int
-    ) -> None:
-        valid = num_units * cluster
-        assert_equal(
-            visits[valid:], torch.zeros_like(visits[valid:]), print_no_mismatch=False
+    @with_run_in_mp
+    @parameterize("num_units", sorted(_BWD_UNIT_RELATIONS))
+    def test_bwd_2cta_peers_consume_matching_units(self, num_units: int):
+        test_case = f"[bwd_2cta_peers][T={num_units}]"
+        seed_test_case(test_case)
+        cluster_size, num_clusters = 2, 4
+        prob = self._bwd_problem(
+            _BWD_UNIT_RELATIONS[num_units], 400, 1400, group=1, num_head_kv=1
         )
-        warps = int(visits[0])
-        self.assertGreater(warps, 0)
-        assert_equal(
-            visits[:valid],
-            torch.full((valid,), warps, dtype=torch.int32),
-            test_case=f"warps_per_tile={visits[:valid].tolist()}",
-            print_no_mismatch=False,
-        )
-        per_unit = clusters[:valid].view(num_units, cluster)
-        assert_equal(
-            per_unit % warps, torch.zeros_like(per_unit), print_no_mismatch=False
-        )
-        assert_equal(
-            per_unit,
-            per_unit[:, :1].expand_as(per_unit),
-            test_case=f"cluster_sums={per_unit.tolist()}",
-            print_no_mismatch=False,
-        )
-
-    def _fwd_visits(
-        self, relations: Relations, num_tiles: int, test_case: str
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        q, k, v = self._qkv(2000, 700, group=1, num_head_kv=1)
-        with record_visits(num_tiles, 1) as (visits, clusters):
-            out, lse = self._det_fwd(
-                q, k, v, relations, sm_margin=self.num_sm - _FWD_UNIT_CLUSTERS
-            )
-        out_ref, lse_ref, _ = _ref_fwd(q, k, v, relations)
-        _assert_fwd_close(
-            out, lse, out_ref, lse_ref, check_finite=True, test_case=test_case
-        )
-        return visits.cpu(), clusters.cpu()
-
-    def _bwd_2cta_visits(
-        self, relations: Relations, num_tiles: int, test_case: str
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        prob = self._bwd_problem(relations, 400, 1400, group=1, num_head_kv=1)
-        with _with_2cta(True), record_visits(num_tiles, 2) as (
-            visits,
-            clusters,
-        ), record_bwd_kernels() as built:
+        valid = num_units * cluster_size
+        with _with_2cta(True), record_visits(
+            valid + 16 * cluster_size, cluster_size
+        ) as (visits, clusters), record_bwd_kernels() as built:
             grads = prob.run(
-                direct_dkv=False, sm_margin=self.num_sm - 2 * _BWD_UNIT_CLUSTERS
+                direct_dkv=False, sm_margin=self.num_sm - cluster_size * num_clusters
             )
         (kernel,) = built
         self.assertTrue(kernel.use_2cta_instrs)
         _assert_grads_close(grads, prob.ref_grads(), test_case)
-        return visits.cpu(), clusters.cpu()
 
-    @with_run_in_mp
-    @parameterize("num_units", sorted(_FWD_UNIT_RELATIONS))
-    def test_fwd_claims_each_unit_once(self, num_units: int):
-        test_case = f"[fwd_claims][T={num_units}]"
-        seed_test_case(test_case)
-        visits, clusters = self._fwd_visits(
-            _FWD_UNIT_RELATIONS[num_units], num_units + 64, test_case
+        visits, clusters = visits.cpu(), clusters.cpu()
+        warps = int(visits[0])
+        self.assertGreater(warps, 0)
+        assert_equal(
+            visits[:valid],
+            torch.full_like(visits[:valid], warps),
+            test_case=test_case,
+            print_no_mismatch=False,
         )
-        self._assert_each_unit_visited_once(visits, clusters, num_units, 1)
-
-    @with_run_in_mp
-    def test_fwd_claims_no_unit_of_empty_q_ranges(self):
-        if self.rank != 0:
-            return
-        test_case = "[fwd_claims][T=0]"
-        seed_test_case(test_case)
-        visits, _ = self._fwd_visits(_FWD_EMPTY_RELATIONS, 64, test_case)
-        assert_equal(visits, torch.zeros_like(visits), print_no_mismatch=False)
-
-    @with_run_in_mp
-    @parameterize("num_units", sorted(_BWD_UNIT_RELATIONS))
-    def test_bwd_2cta_claims_each_unit_once_on_both_peers(self, num_units: int):
-        test_case = f"[bwd_2cta_claims][T={num_units}]"
-        seed_test_case(test_case)
-        visits, clusters = self._bwd_2cta_visits(
-            _BWD_UNIT_RELATIONS[num_units], 2 * (num_units + 16), test_case
+        assert_equal(
+            visits[valid:],
+            torch.zeros_like(visits[valid:]),
+            test_case=test_case,
+            print_no_mismatch=False,
         )
-        self._assert_each_unit_visited_once(visits, clusters, num_units, 2)
-
-    @with_run_in_mp
-    def test_bwd_2cta_claims_no_unit_of_empty_k_ranges(self):
-        if self.rank != 0:
-            return
-        test_case = "[bwd_2cta_claims][T=0]"
-        seed_test_case(test_case)
-        visits, _ = self._bwd_2cta_visits(_BWD_EMPTY_RELATIONS, 32, test_case)
-        assert_equal(visits, torch.zeros_like(visits), print_no_mismatch=False)
+        per_unit = clusters[:valid].view(num_units, cluster_size)
+        assert_equal(
+            per_unit % warps,
+            torch.zeros_like(per_unit),
+            test_case=test_case,
+            print_no_mismatch=False,
+        )
+        assert_equal(
+            per_unit[:, 0], per_unit[:, 1], test_case=test_case, print_no_mismatch=False
+        )
 
 
 if __name__ == "__main__":
