@@ -123,14 +123,11 @@ def dq_pair_k_tile_end_on_block(
                         (
                             n_lo,
                             n_hi,
-                        ) = block_info.get_n_block_min_max_for_m_block_per_range_seqlens(
+                        ) = block_info.get_n_block_min_max_per_range_seqlens(
                             seqlen_q, seqlen_k, mt, attn_type
                         )
                     else:
-                        (
-                            n_lo,
-                            n_hi,
-                        ) = block_info.get_n_block_min_max_for_m_block_seqlens(
+                        n_lo, n_hi = block_info.get_n_block_min_max_seqlens(
                             seqlen_q, seqlen_k, mt
                         )
                     if n_hi > n_lo:

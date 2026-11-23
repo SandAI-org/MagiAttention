@@ -7301,7 +7301,7 @@ class FFABwdSm100:
                                             (
                                                 l_m,
                                                 r_m,
-                                            ) = block_info.get_n_block_min_max_for_m_block_per_range_seqlens(
+                                            ) = block_info.get_n_block_min_max_per_range_seqlens(
                                                 seqlen_q,
                                                 seqlen_k_group,
                                                 mt,
@@ -7311,7 +7311,7 @@ class FFABwdSm100:
                                             (
                                                 l_m,
                                                 r_m,
-                                            ) = block_info.get_n_block_min_max_for_m_block_seqlens(
+                                            ) = block_info.get_n_block_min_max_seqlens(
                                                 seqlen_q,
                                                 seqlen_k_group,
                                                 mt,
@@ -7374,12 +7374,12 @@ class FFABwdSm100:
         n_min_m = Int32(0)
         if n_block_cta_group > 0:
             if const_expr(self.use_per_range_mask):
-                n_min_m, _ = block_info.get_n_block_min_max_for_m_block_per_range(
-                    seqlen_info, m_block, attn_type
+                n_min_m, _ = block_info.get_n_block_min_max_per_range_seqlens(
+                    seqlen_info.seqlen_q, seqlen_info.seqlen_k, m_block, attn_type
                 )
             else:
-                n_min_m, _ = block_info.get_n_block_min_max_for_m_block(
-                    seqlen_info, m_block
+                n_min_m, _ = block_info.get_n_block_min_max_seqlens(
+                    seqlen_info.seqlen_q, seqlen_info.seqlen_k, m_block
                 )
         need_prev_n = n_block_cta_group > 0 and n_min_m == n_block_cta_group
 
@@ -7397,12 +7397,15 @@ class FFABwdSm100:
                         (
                             l_prev,
                             r_prev,
-                        ) = block_info.get_n_block_min_max_for_m_block_per_range(
-                            seqlen_info, m_block - 1, attn_type
+                        ) = block_info.get_n_block_min_max_per_range_seqlens(
+                            seqlen_info.seqlen_q,
+                            seqlen_info.seqlen_k,
+                            m_block - 1,
+                            attn_type,
                         )
                     else:
-                        l_prev, r_prev = block_info.get_n_block_min_max_for_m_block(
-                            seqlen_info, m_block - 1
+                        l_prev, r_prev = block_info.get_n_block_min_max_seqlens(
+                            seqlen_info.seqlen_q, seqlen_info.seqlen_k, m_block - 1
                         )
                     if r_prev > l_prev and l_prev < n_block_cta_group:
                         prev_n_left = cutlass.min(n_block_cta_group, r_prev) - 1
@@ -8277,15 +8280,17 @@ class FFABwdSm100:
                                     (
                                         n_min_m,
                                         _,
-                                    ) = block_info.get_n_block_min_max_for_m_block_per_range(
-                                        seqlen_info, m_block, attn_type
+                                    ) = block_info.get_n_block_min_max_per_range_seqlens(
+                                        seqlen_info.seqlen_q,
+                                        seqlen_info.seqlen_k,
+                                        m_block,
+                                        attn_type,
                                     )
                                 else:
-                                    (
-                                        n_min_m,
-                                        _,
-                                    ) = block_info.get_n_block_min_max_for_m_block(
-                                        seqlen_info, m_block
+                                    n_min_m, _ = block_info.get_n_block_min_max_seqlens(
+                                        seqlen_info.seqlen_q,
+                                        seqlen_info.seqlen_k,
+                                        m_block,
                                     )
                                 dq_sem_lock = n_block_cta_group - n_min_m
                         if const_expr(self.range_dq_chain):
