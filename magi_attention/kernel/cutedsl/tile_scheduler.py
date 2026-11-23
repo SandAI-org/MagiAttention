@@ -44,7 +44,6 @@ from cutlass.utils.hardware_info import HardwareInfo
 
 # isort: split
 from quack.cute_dsl_utils import ParamsBase
-from quack.utils import store_shared_remote
 
 from . import cutedsl_utils
 from .dsl_compat import (
@@ -120,15 +119,17 @@ class DynamicState(ParamsBase):
     """Runtime state of the DYNAMIC persistent schedule.
 
     Each cluster starts with its grid-assigned or claimed tile. Its leader's scheduler
-    warp claims subsequent tiles from a global counter and publishes a 4-byte
-    index to every CTA. All warps consume each index before the slot is reused.
+    warp claims subsequent tiles from a global counter, decodes them once into
+    ``(unit, block_cluster, head_idx, batch_idx)`` and publishes the 16-byte
+    record to every CTA; ``batch_idx == num_batch`` marks a unit past the last
+    tile. All warps consume each slot before reuse.
     1-CTA clusters use ``PipelineAsync`` since ``st.async.shared::cluster`` is undefined for 1 CTA (PTX ISA).
     """
 
     _pipeline: PipelineClcFetchAsync | PipelineAsync
     _consumer_state: PipelineState
     _producer_state: PipelineState
-    # smem Int32, one slot per scheduler stage
+    # 16-byte aligned smem Int32[4 * num_stages]: 4 Int32s per scheduler stage
     _response_ptr: cute.Pointer
 
     @staticmethod
@@ -155,7 +156,7 @@ class DynamicState(ParamsBase):
                 num_stages=num_stages,
                 producer_group=producer_group,
                 consumer_group=consumer_group,
-                tx_count=4,
+                tx_count=16,
                 cta_layout_vmnk=cta_layout_vmnk,
             )
         return DynamicState(
@@ -178,32 +179,55 @@ class DynamicState(ParamsBase):
     def producer_acquire(self, *, loc=None, ip=None):
         self._pipeline.producer_acquire(self._producer_state, loc=loc, ip=ip)
 
-    def publish(self, unit: Int32, cluster_size: int):
-        slot_ptr = self._response_ptr + self._producer_state.index
+    def publish(
+        self,
+        unit: Int32,
+        block_cluster: Int32,
+        head_idx: Int32,
+        batch_idx: Int32,
+        cluster_size: int,
+    ):
+        slot_ptr = self._response_ptr + self._producer_state.index * 4
         # Test the multi-CTA type: CUTLASS DSL 4.8 derives PipelineClcFetchAsync
         # from PipelineAsync, so an isinstance check on PipelineAsync matches both.
         if const_expr(isinstance(self._pipeline, PipelineClcFetchAsync)):
             full_mbar_ptr = self._pipeline.producer_get_barrier(self._producer_state)
             with cute.arch.elect_one():
                 for cta_rank in range(cluster_size):
-                    store_shared_remote(unit, slot_ptr, full_mbar_ptr, Int32(cta_rank))
+                    cutedsl_utils.store_shared_remote_v4(
+                        unit,
+                        block_cluster,
+                        head_idx,
+                        batch_idx,
+                        slot_ptr,
+                        full_mbar_ptr,
+                        Int32(cta_rank),
+                    )
         else:
             assert cluster_size == 1
             with cute.arch.elect_one():
-                cute.make_tensor(slot_ptr, cute.make_layout(1))[0] = unit
+                slot = cute.make_tensor(slot_ptr, cute.make_layout(4))
+                slot[0] = unit
+                slot[1] = block_cluster
+                slot[2] = head_idx
+                slot[3] = batch_idx
                 self._pipeline.producer_commit(self._producer_state)
 
     def producer_advance(self, *, loc=None, ip=None):
         self._producer_state.advance(loc=loc, ip=ip)
 
-    def read_published(self) -> Int32:
-        """Read the current slot; call between consumer_wait and consumer_release."""
-        slot_ptr = self._response_ptr + self._consumer_state.index
-        unit = Int32(cute.make_tensor(slot_ptr, cute.make_layout(1))[0])
+    def read_published(self) -> Tuple[Int32, Int32, Int32, Int32]:
+        """Read the current 16-byte slot; call between consumer_wait and consumer_release."""
+        slot_ptr = self._response_ptr + self._consumer_state.index * 4
+        slot = cute.make_tensor(slot_ptr, cute.make_layout(4))
+        unit = Int32(slot[0])
+        block_cluster = Int32(slot[1])
+        head_idx = Int32(slot[2])
+        batch_idx = Int32(slot[3])
         if const_expr(isinstance(self._pipeline, PipelineClcFetchAsync)):
-            # Order generic-proxy read before next st.async; 1-CTA uses generic st.shared.
+            # Order generic-proxy reads before next st.async; 1-CTA uses generic st.shared.
             cute.arch.fence_proxy("async.shared", space="cta")
-        return unit
+        return unit, block_cluster, head_idx, batch_idx
 
     def consumer_wait(self, *, loc=None, ip=None):
         self._pipeline.consumer_wait(self._consumer_state, loc=loc, ip=ip)
@@ -1070,6 +1094,11 @@ class SingleTileVarlenScheduler:
         clc: ClcState | None = None,
         *,
         dynamic: DynamicState | None = None,
+        cursor_batch: Int32 | None = None,
+        cursor_group_start: Int32 | None = None,
+        cursor_group_end: Int32 | None = None,
+        cursor_m_blocks: Int32 | None = None,
+        cursor_m_blocks_cum: Int32 | None = None,
         loc=None,
         ip=None,
     ):
@@ -1080,6 +1109,17 @@ class SingleTileVarlenScheduler:
         self._producer_active = False
         self.clc = clc
         self.dynamic = dynamic
+        self._cursor_batch = Int32(0) if cursor_batch is None else cursor_batch
+        self._cursor_group_start = (
+            Int32(0) if cursor_group_start is None else cursor_group_start
+        )
+        self._cursor_group_end = (
+            Int32(-1) if cursor_group_end is None else cursor_group_end
+        )
+        self._cursor_m_blocks = Int32(0) if cursor_m_blocks is None else cursor_m_blocks
+        self._cursor_m_blocks_cum = (
+            Int32(0) if cursor_m_blocks_cum is None else cursor_m_blocks_cum
+        )
         self._loc = loc
         self._ip = ip
 
@@ -1254,7 +1294,8 @@ class SingleTileVarlenScheduler:
 
     @cute.jit
     def _decode_mh_block(self, num_m_blocks: Int32, mh_block: Int32):
-        """Split a batch-local (m, head) flat index into (block, head_idx)."""
+        """Split a batch-local (m, head) flat index into the cluster-level
+        ``(block_cluster, head_idx)``."""
         params = self.params
         if cutlass.const_expr(params.lpt or params.head_swizzle):
             # This is a version of the SingleTileLPTScheduler, complicated by the fact that
@@ -1301,16 +1342,124 @@ class SingleTileVarlenScheduler:
         else:
             head_idx = mh_block // num_m_blocks
             block = mh_block - head_idx * num_m_blocks
-        if cutlass.const_expr(
-            params.cluster_shape_m > 1 and not params.use_cluster_idx
-        ):
-            # bwd 2-CTA: expand cluster-level block by the in-cluster rank
-            bidx_in_cluster = cute.arch.block_in_cluster_idx()
-            block = block * params.cluster_shape_m + bidx_in_cluster[0]
         return block, head_idx
 
     @cute.jit
-    def _varlen_coord_map(self) -> WorkTileInfo:
+    def _cta_block(self, block_cluster: Int32) -> Int32:
+        """Block of this CTA within cluster-level ``block_cluster``: bwd 2-CTA
+        peers take the adjacent blocks of one cluster-level block."""
+        params = self.params
+        block = block_cluster
+        if cutlass.const_expr(
+            params.cluster_shape_m > 1 and not params.use_cluster_idx
+        ):
+            block = (
+                block_cluster * params.cluster_shape_m
+                + cute.arch.block_in_cluster_idx()[0]
+            )
+        return block
+
+    @cute.jit
+    def _decode_unit(
+        self, unit: Int32, *, use_cursor: cutlass.Constexpr[bool]
+    ) -> Tuple[Int32, Int32, Int32]:
+        """Decode cluster-level flat tile index ``unit`` into
+        ``(block_cluster, head_idx, batch_idx)``; ``batch_idx == num_batch``
+        marks a unit past the last tile.
+
+        ``use_cursor`` resumes from the 31-batch window of the previous decode
+        when ``unit`` is not before it, and stores the window reached.
+        """
+        params = self.params
+        num_batch = SingleTileVarlenScheduler.device_num_batch(params)
+        lane_idx = cute.arch.lane_idx()
+        m_blocks_in_group = Int32(0)
+        if cutlass.const_expr(use_cursor):
+            batch_idx = self._cursor_batch
+            group_start_tile = self._cursor_group_start
+            group_end_tile = self._cursor_group_end
+            num_m_blocks = self._cursor_m_blocks
+            num_m_blocks_cumulative = self._cursor_m_blocks_cum
+            need_init = group_end_tile < Int32(0) or unit < group_start_tile
+            if need_init:
+                batch_idx = Int32(0)
+                group_start_tile = Int32(0)
+                num_m_blocks = self._get_num_m_blocks(lane_idx, bidb_start=Int32(0))
+                num_m_blocks_cumulative = cutedsl_utils.warp_prefix_sum(
+                    num_m_blocks, lane_idx
+                )
+                m_blocks_in_group = cute.arch.shuffle_sync(
+                    num_m_blocks_cumulative, cute.arch.WARP_SIZE - 1
+                )
+                group_end_tile = m_blocks_in_group * params.num_head
+        else:
+            batch_idx = Int32(0)
+            group_start_tile = Int32(0)
+            num_m_blocks = self._get_num_m_blocks(lane_idx, bidb_start=Int32(0))
+            num_m_blocks_cumulative = cutedsl_utils.warp_prefix_sum(
+                num_m_blocks, lane_idx
+            )
+            m_blocks_in_group = cute.arch.shuffle_sync(
+                num_m_blocks_cumulative, cute.arch.WARP_SIZE - 1
+            )
+            group_end_tile = m_blocks_in_group * params.num_head
+
+        while group_end_tile <= unit and batch_idx < num_batch:
+            batch_idx += cute.arch.WARP_SIZE - 1
+            if batch_idx >= num_batch:
+                batch_idx = Int32(num_batch)
+            else:
+                group_start_tile = group_end_tile
+                num_m_blocks = self._get_num_m_blocks(lane_idx, bidb_start=batch_idx)
+                num_m_blocks_cumulative = cutedsl_utils.warp_prefix_sum(
+                    num_m_blocks, lane_idx
+                )
+                m_blocks_in_group = cute.arch.shuffle_sync(
+                    num_m_blocks_cumulative, cute.arch.WARP_SIZE - 1
+                )
+                group_end_tile = group_start_tile + m_blocks_in_group * params.num_head
+
+        if cutlass.const_expr(use_cursor):
+            self._cursor_batch = batch_idx
+            self._cursor_group_start = group_start_tile
+            self._cursor_group_end = group_end_tile
+            self._cursor_m_blocks = num_m_blocks
+            self._cursor_m_blocks_cum = num_m_blocks_cumulative
+
+        block_cluster = Int32(0)
+        head_idx = Int32(0)
+        batch_out = Int32(num_batch)
+        if batch_idx < num_batch:
+            batch_idx_in_group = cute.arch.popc(
+                cute.arch.vote_ballot_sync(
+                    group_start_tile + num_m_blocks_cumulative * params.num_head <= unit
+                )
+            )
+            decoded_batch = batch_idx + batch_idx_in_group
+            if decoded_batch < num_batch:
+                num_m_blocks_prev_lane = (
+                    Int32(0)
+                    if batch_idx_in_group == 0
+                    else cute.arch.shuffle_sync(
+                        num_m_blocks_cumulative, batch_idx_in_group - 1
+                    )
+                )
+                num_m_blocks_cur = cute.arch.shuffle_sync(
+                    num_m_blocks, batch_idx_in_group
+                )
+                mh_block = (
+                    unit - group_start_tile - num_m_blocks_prev_lane * params.num_head
+                )
+                block_cluster, head_idx = self._decode_mh_block(
+                    num_m_blocks_cur, mh_block
+                )
+                batch_out = decoded_batch
+        return Int32(block_cluster), Int32(head_idx), Int32(batch_out)
+
+    @cute.jit
+    def _varlen_coord_map(
+        self, *, use_cursor: cutlass.Constexpr[bool] = False
+    ) -> WorkTileInfo:
         """Map self._tile_idx to (block, head, batch) via warp-level prefix sums."""
         params = self.params
         num_batch = SingleTileVarlenScheduler.device_num_batch(params)
@@ -1337,6 +1486,7 @@ class SingleTileVarlenScheduler:
                 if batch_idx < num_batch:
                     mh_block = next_tile_idx - batch_idx * tiles_per_batch
                     block, head_idx = self._decode_mh_block(num_m_blocks, mh_block)
+                    block = self._cta_block(block)
             is_valid = False
             if batch_idx < num_batch:
                 is_valid = (
@@ -1353,66 +1503,14 @@ class SingleTileVarlenScheduler:
             return WorkTileInfo(
                 (Int32(block), Int32(head_idx), Int32(batch_idx), split_idx), is_valid
             )
-        lane_idx = cute.arch.lane_idx()
-        num_m_blocks = self._get_num_m_blocks(lane_idx, bidb_start=0)
-        num_m_blocks_cumulative = cutedsl_utils.warp_prefix_sum(num_m_blocks, lane_idx)
-        # Total number of blocks for the next 31 batches
-        m_blocks_in_group = cute.arch.shuffle_sync(
-            num_m_blocks_cumulative, cute.arch.WARP_SIZE - 1
+        block_cluster, head_idx, batch_idx = self._decode_unit(
+            self._tile_idx // params.cluster_shape_m, use_cursor=use_cursor
         )
-        # Same for all lanes
-        group_end_tile = m_blocks_in_group * params.num_head
-        # if cute.arch.thread_idx()[0] == 128 + 31: cute.printf("SingleTileVarlenScheduler: tile_idx=%d, group_end_tile = %d, num_m_blocks=%d, num_m_blocks_cumulative = %d, m_blocks_in_group = %d", self._tile_idx, group_end_tile, num_m_blocks, num_m_blocks_cumulative, m_blocks_in_group)  # noqa: E501
-        block, head_idx, batch_idx = Int32(0), Int32(0), Int32(0)
-        next_tile_idx = self._tile_idx // params.cluster_shape_m
-        while group_end_tile <= next_tile_idx:
-            batch_idx += cute.arch.WARP_SIZE - 1
-            if batch_idx >= num_batch:
-                batch_idx = Int32(num_batch)
-                group_end_tile = next_tile_idx + 1
-            else:
-                num_m_blocks = self._get_num_m_blocks(lane_idx, bidb_start=batch_idx)
-                num_m_blocks_cumulative = cutedsl_utils.warp_prefix_sum(
-                    num_m_blocks, lane_idx
-                )
-                m_blocks_in_group = cute.arch.shuffle_sync(
-                    num_m_blocks_cumulative, cute.arch.WARP_SIZE - 1
-                )
-                group_end_tile += m_blocks_in_group * params.num_head
-        is_valid = False
-        if batch_idx >= num_batch:
-            block, head_idx, batch_idx = Int32(0), Int32(0), Int32(num_batch)
-        else:
-            group_start_tile = group_end_tile - m_blocks_in_group * params.num_head
-            # if cute.arch.thread_idx()[0] == 128 + 31: cute.printf("SingleTileVarlenScheduler: tile_idx=%d, group_end_tile = %d, num_m_blocks=%d, batch_idx = %d", self._tile_idx, group_end_tile, num_m_blocks, batch_idx)  # noqa: E501
-            # The next problem to process is the first one that does not have ending tile position
-            # that is greater than or equal to tile index.
-            batch_idx_in_group = cute.arch.popc(
-                cute.arch.vote_ballot_sync(
-                    group_start_tile + num_m_blocks_cumulative * params.num_head
-                    <= next_tile_idx
-                )
-            )
-            batch_idx += batch_idx_in_group
-            num_m_blocks_prev_lane = (
-                0
-                if batch_idx_in_group == 0
-                else cute.arch.shuffle_sync(
-                    num_m_blocks_cumulative, batch_idx_in_group - 1
-                )
-            )
-            num_m_blocks = cute.arch.shuffle_sync(num_m_blocks, batch_idx_in_group)
-            mh_block = (
-                next_tile_idx
-                - group_start_tile
-                - num_m_blocks_prev_lane * params.num_head
-            )
-            block, head_idx = self._decode_mh_block(num_m_blocks, mh_block)
-            is_valid = self._is_first_block and batch_idx < num_batch
-        # if cute.arch.thread_idx()[0] == 128: cute.printf("SingleTileVarlenScheduler: tile_idx=%d, batch_idx=%d, head_idx=%d, block=%d, is_valid = %d", self._tile_idx, batch_idx, head_idx, block, is_valid)  # noqa: E501
+        is_valid = self._is_first_block and batch_idx < num_batch
         split_idx = self._split_idx if const_expr(params.is_split_kv) else Int32(0)
         return WorkTileInfo(
-            (Int32(block), Int32(head_idx), Int32(batch_idx), split_idx), is_valid
+            (self._cta_block(block_cluster), head_idx, batch_idx, split_idx),
+            is_valid,
         )
 
     @cute.jit
@@ -1432,7 +1530,7 @@ class SingleTileVarlenScheduler:
                     new_split_idx = clc_work.tile_idx[1]
             self._tile_idx = new_tile_idx
             self._split_idx = new_split_idx
-        return self._varlen_coord_map()
+        return self._varlen_coord_map(use_cursor=True)
 
     @cute.jit
     def _claim_unit(self) -> Int32:
@@ -1451,15 +1549,27 @@ class SingleTileVarlenScheduler:
             return claimed
         return claimed + cute.arch.grid_dim()[0] // params.cluster_shape_m
 
+    @cute.jit
+    def _build_published_work_tile(
+        self, block_cluster: Int32, head_idx: Int32, batch_idx: Int32
+    ) -> WorkTileInfo:
+        params = self.params
+        is_valid = batch_idx < SingleTileVarlenScheduler.device_num_batch(params)
+        split_idx = self._split_idx if const_expr(params.is_split_kv) else Int32(0)
+        return WorkTileInfo(
+            (self._cta_block(block_cluster), head_idx, batch_idx, split_idx),
+            is_valid,
+        )
+
     def _consume_published_unit(self, *, loc=None, ip=None) -> WorkTileInfo:
         assert self.dynamic is not None  # mypy
+        cluster_size = self.params.cluster_shape_m
         self.dynamic.consumer_wait(loc=loc, ip=ip)
-        unit = self.dynamic.read_published()
+        unit, block_cluster, head_idx, batch_idx = self.dynamic.read_published()
         self.dynamic.consumer_release(loc=loc, ip=ip)
         self.dynamic.consumer_advance(loc=loc, ip=ip)
-        cluster_size = self.params.cluster_shape_m
         self._tile_idx = unit * cluster_size + cute.arch.block_idx()[0] % cluster_size
-        return self._varlen_coord_map()
+        return self._build_published_work_tile(block_cluster, head_idx, batch_idx)
 
     def initial_work_tile_info(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
@@ -1472,7 +1582,7 @@ class SingleTileVarlenScheduler:
             if const_expr(self.params.claim_first_tile):
                 return self._consume_published_unit(loc=loc, ip=ip)
             self._tile_idx = cute.arch.block_idx()[0]
-            return self._varlen_coord_map()
+            return self._varlen_coord_map(use_cursor=False)
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
             clc_work = self.clc.initial_work_tile_info()
             # See get_current_work for why grid_dim and local-then-assign.
@@ -1484,19 +1594,27 @@ class SingleTileVarlenScheduler:
                     new_split_idx = clc_work.tile_idx[1]
             self._tile_idx = new_tile_idx
             self._split_idx = new_split_idx
-        return self._varlen_coord_map()
+        return self._varlen_coord_map(use_cursor=False)
 
     def prefetch_next_work(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
             self.clc.prefetch_next_work(loc=loc, ip=ip)
         elif const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
-            self._claim_and_publish(loc=loc, ip=ip)
+            self._claim_and_publish(use_cursor=True, loc=loc, ip=ip)
 
-    def _claim_and_publish(self, *, loc=None, ip=None):
+    def _claim_and_publish(
+        self, *, use_cursor: cutlass.Constexpr[bool], loc=None, ip=None
+    ):
         assert self.dynamic is not None  # mypy
         # Acquire slot before claiming so a cluster stays at most one claimed tile ahead of its slowest warp.
         self.dynamic.producer_acquire(loc=loc, ip=ip)
-        self.dynamic.publish(self._claim_unit(), self.params.cluster_shape_m)
+        unit = self._claim_unit()
+        block_cluster, head_idx, batch_idx = self._decode_unit(
+            unit, use_cursor=use_cursor
+        )
+        self.dynamic.publish(
+            unit, block_cluster, head_idx, batch_idx, self.params.cluster_shape_m
+        )
         self.dynamic.producer_advance(loc=loc, ip=ip)
 
     def claim_first_work(self, *, loc=None, ip=None):
@@ -1505,7 +1623,9 @@ class SingleTileVarlenScheduler:
             self.dynamic.reset_producer(loc=loc, ip=ip)
             self._producer_active = True
             if const_expr(self.params.claim_first_tile):
-                self._claim_and_publish(loc=loc, ip=ip)
+                # The cursor is written only inside a role's tile loop: this
+                # claim runs before the loop, on the object all roles share.
+                self._claim_and_publish(use_cursor=False, loc=loc, ip=ip)
 
     def advance_to_next_work(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
@@ -1526,7 +1646,16 @@ class SingleTileVarlenScheduler:
             self.dynamic.producer_tail(loc=loc, ip=ip)
 
     def _mlir_objs(self) -> list:
-        objs = [self.params, self._tile_idx, self._split_idx]
+        objs = [
+            self.params,
+            self._tile_idx,
+            self._split_idx,
+            self._cursor_batch,
+            self._cursor_group_start,
+            self._cursor_group_end,
+            self._cursor_m_blocks,
+            self._cursor_m_blocks_cum,
+        ]
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
             objs.append(self.clc)
         elif const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
@@ -1546,7 +1675,17 @@ class SingleTileVarlenScheduler:
         for obj, n_items in zip(self._mlir_objs(), self._values_pos):
             obj_list.append(cutlass.new_from_mlir_values(obj, values[:n_items]))
             values = values[n_items:]
-        params, tile_idx, split_idx, *state = obj_list
+        (
+            params,
+            tile_idx,
+            split_idx,
+            cursor_batch,
+            cursor_group_start,
+            cursor_group_end,
+            cursor_m_blocks,
+            cursor_m_blocks_cum,
+            *state,
+        ) = obj_list
         is_clc = const_expr(self.params.scheduling_mode == SchedulingMode.CLC)
         is_dynamic = const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC)
         return self.__class__(
@@ -1555,6 +1694,11 @@ class SingleTileVarlenScheduler:
             split_idx,
             state[0] if is_clc else None,
             dynamic=state[0] if is_dynamic else None,
+            cursor_batch=cursor_batch,
+            cursor_group_start=cursor_group_start,
+            cursor_group_end=cursor_group_end,
+            cursor_m_blocks=cursor_m_blocks,
+            cursor_m_blocks_cum=cursor_m_blocks_cum,
             loc=self._loc,
         )
 

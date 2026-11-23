@@ -1922,3 +1922,40 @@ def mbarrier_wait_acquire_cluster(
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,
     )
+
+
+@dsl_user_op
+def store_shared_remote_v4(
+    v0: Int32,
+    v1: Int32,
+    v2: Int32,
+    v3: Int32,
+    smem_ptr: cute.Pointer,
+    mbar_ptr: cute.Pointer,
+    peer_cta_rank_in_cluster: Int32,
+    *,
+    loc=None,
+    ip=None,
+) -> None:
+    """Async store 16B (four int32s, 16B-aligned) to peer CTA smem and complete 16 tx bytes."""
+    llvm.inline_asm(
+        None,
+        [
+            smem_ptr.toint(loc=loc, ip=ip).ir_value(),
+            mbar_ptr.toint(loc=loc, ip=ip).ir_value(),
+            Int32(peer_cta_rank_in_cluster).ir_value(loc=loc, ip=ip),
+            Int32(v0).ir_value(loc=loc, ip=ip),
+            Int32(v1).ir_value(loc=loc, ip=ip),
+            Int32(v2).ir_value(loc=loc, ip=ip),
+            Int32(v3).ir_value(loc=loc, ip=ip),
+        ],
+        "{\n\t.reg .b32 remote_smem, remote_mbar;\n\t"
+        "mapa.shared::cluster.u32 remote_smem, $0, $2;\n\t"
+        "mapa.shared::cluster.u32 remote_mbar, $1, $2;\n\t"
+        "st.async.shared::cluster.mbarrier::complete_tx::bytes.v4.s32 "
+        "[remote_smem], {$3, $4, $5, $6}, [remote_mbar];\n\t}",
+        "r,r,r,r,r,r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+    )

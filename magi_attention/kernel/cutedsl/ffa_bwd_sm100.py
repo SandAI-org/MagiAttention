@@ -1435,7 +1435,7 @@ class FFABwdSm100:
 
         dynamic_schedule = self.scheduling_mode == SchedulingMode.DYNAMIC
         sched_mbar_size = 2 * self.sched_stages if dynamic_schedule else 0
-        sched_response_size = self.sched_stages if dynamic_schedule else 0
+        sched_response_size = 4 * self.sched_stages if dynamic_schedule else 0
         dq_pair_mbar_size = 2 if self.dq_pair_handoff else 0
 
         sdK_bytes = cute.size_in_bytes(self.dk_dtype, self.sdK_layout)
@@ -1494,9 +1494,11 @@ class FFABwdSm100:
                 # Tmem dealloc cluster mbarrier
                 tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
                 tile_done_mbar_ptr: cute.struct.MemRange[Int64, 1]
-                # DYNAMIC schedule: full/empty mbarriers and the response slot
+                # DYNAMIC schedule: full/empty mbarriers and 16B response slots
                 sched_mbar_ptr: cute.struct.MemRange[cutlass.Int64, sched_mbar_size]
-                sched_response: cute.struct.MemRange[Int32, sched_response_size]
+                sched_response: cute.struct.Align[
+                    cute.struct.MemRange[Int32, sched_response_size], 16
+                ]
                 # Tmem holding buffer ptr
                 tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
@@ -1594,9 +1596,11 @@ class FFABwdSm100:
                 # Tmem dealloc cluster mbarrier
                 tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
                 tile_done_mbar_ptr: cute.struct.MemRange[Int64, 1]
-                # DYNAMIC schedule: full/empty mbarriers and the response slot
+                # DYNAMIC schedule: full/empty mbarriers and 16B response slots
                 sched_mbar_ptr: cute.struct.MemRange[cutlass.Int64, sched_mbar_size]
-                sched_response: cute.struct.MemRange[Int32, sched_response_size]
+                sched_response: cute.struct.Align[
+                    cute.struct.MemRange[Int32, sched_response_size], 16
+                ]
                 # Tmem holding buffer ptr
                 tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
                 dq_pair_mbar_ptr: cute.struct.MemRange[cutlass.Int64, dq_pair_mbar_size]
@@ -2986,8 +2990,7 @@ class FFABwdSm100:
 
                         dS_cluster_phase ^= 1
 
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
+            work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
     def scheduler_warp(self, tile_scheduler: SingleTileVarlenScheduler):
@@ -4223,8 +4226,7 @@ class FFABwdSm100:
             any_tile_processed = any_tile_processed or process_tile
 
             # Advance to next KV tile
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
+            work_tile = tile_scheduler.advance_to_next_work()
 
         # --- Producer tail ---
         # Drain used pipelines once at exit; TMA tails leave pending transactions.
@@ -5083,8 +5085,7 @@ class FFABwdSm100:
                             )
 
             # Advance to next KV tile
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
+            work_tile = tile_scheduler.advance_to_next_work()
 
         # --- Producer tail ---
 
@@ -6844,8 +6845,7 @@ class FFABwdSm100:
                     cute.arch.mbarrier_arrive(tile_done_mbar_ptr)
 
             # Advance to next KV tile
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
+            work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
     def _dkv_k_tile_is_active(
@@ -8651,8 +8651,7 @@ class FFABwdSm100:
                             1,
                         )
 
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
+            work_tile = tile_scheduler.advance_to_next_work()
 
         if const_expr(not self.deterministic):
             cute.arch.cp_async_bulk_wait_group(0, read=True)
