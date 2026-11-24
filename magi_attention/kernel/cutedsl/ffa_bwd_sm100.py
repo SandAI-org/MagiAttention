@@ -8303,8 +8303,10 @@ class FFABwdSm100:
                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
             cutedsl_utils.arrive_inc(mdKV_semaphore_cur.iterator, tidx, wg_idx, 1)
-        elif const_expr(self.is_persistent):
-            # Wait for TMA reads before the next tile reuses shared memory.
+        elif const_expr(self.is_persistent and not self.range_dkv_write_order):
+            # Wait for TMA reads before the next tile reuses shared memory. The
+            # dK/dV write order path drains reads after every stage and all writes
+            # before its arrive.
             if leader_warp:
                 cute.arch.cp_async_bulk_commit_group()
                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
