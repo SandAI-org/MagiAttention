@@ -16,7 +16,7 @@ import math
 import os
 import unittest
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 from unittest import TestCase, mock
 
 import torch
@@ -97,12 +97,26 @@ class _BwdProblem:
     relations: Relations
     args: dict
 
-    def tensors(self) -> tuple[torch.Tensor, ...]:
+    def tensors(
+        self,
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+    ]:
         return (self.q, self.k, self.v, self.out, self.lse, self.do)
 
     def run(self, *, direct_dkv: bool = True, **kwargs) -> tuple[torch.Tensor, ...]:
         return _flex_flash_attn_bwd(
-            *self.tensors(),
+            self.q,
+            self.k,
+            self.v,
+            self.out,
+            self.lse,
+            self.do,
             **self.args,
             disable_bwd_dkv_atomic_reduction=direct_dkv,
             deterministic=True,
@@ -501,7 +515,11 @@ _BWD_UNIT_RELATIONS: dict[int, Relations] = {
 
 
 class _RangeDetHelpers:
-    device: int
+    if TYPE_CHECKING:
+
+        @property
+        def device(self) -> int:
+            ...
 
     @property
     def num_sm(self) -> int:

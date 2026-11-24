@@ -6681,7 +6681,7 @@ class FFABwdSm100:
                         dkv_right_weight,
                         dkv_writer,
                         head_kv,
-                    ) = self._dkv_chain_wait(
+                    ) = range_chain.dkv_chain_wait(
                         dkv_chain,
                         block_info,
                         mQRanges,
@@ -6691,10 +6691,15 @@ class FFABwdSm100:
                         mDKVGroupAllKActive,
                         seqlen_info,
                         attn_type,
-                        n_block,
+                        n_block // self.cta_group_size,
                         head_idx,
                         batch_idx,
                         tidx == 0,
+                        self.tile_n * self.cta_group_size,
+                        self.gqa_fold.covers_all_qheads,
+                        self.gqa_fold.kv_group,
+                        self.range_merge,
+                        self.use_per_range_mask,
                     )
                     self.compute_sync_barrier.arrive_and_wait()
                     # Order tidx == 0's acquire before WG leader warps' TMA async-proxy ops.
@@ -6866,672 +6871,6 @@ class FFABwdSm100:
 
             # Advance to next KV tile
             work_tile = tile_scheduler.advance_to_next_work()
-
-    @cute.jit
-    def _dkv_k_tile_is_active(
-        self,
-        block_info: BlockInfo,
-        mQRanges: cute.Tensor,
-        mKRanges: cute.Tensor,
-        mMaskTypes: Optional[cute.Tensor],
-        mCuBatches: Optional[cute.Tensor],
-        mGroupAllKActive: Optional[cute.Tensor],
-        r: Int32,
-        n_cta: Int32,
-    ) -> cutlass.Boolean:
-        seqlen_k = mKRanges[r, 1] - mKRanges[r, 0]
-        active = cutlass.Boolean(False)
-        if const_expr(self.range_merge):
-            assert (
-                mMaskTypes is not None
-                and mCuBatches is not None
-                and mGroupAllKActive is not None
-            )
-            if n_cta >= 0 and n_cta * block_info.tile_n < seqlen_k:
-                if mGroupAllKActive[r] != 0:
-                    active = cutlass.Boolean(True)
-                else:
-                    row = Int32(mCuBatches[r])
-                    row_end = Int32(mCuBatches[r + 1])
-                    while row < row_end and not active:
-                        active = range_chain.dkv_pair_k_tile_is_active(
-                            block_info,
-                            mQRanges[row, 1] - mQRanges[row, 0],
-                            seqlen_k,
-                            n_cta,
-                            Int32(mMaskTypes[row]),
-                            True,
-                        )
-                        row += 1
-        else:
-            attn_r = Int32(MT_MAP.full)
-            if const_expr(self.use_per_range_mask):
-                assert mMaskTypes is not None
-                attn_r = Int32(mMaskTypes[r])
-            active = range_chain.dkv_pair_k_tile_is_active(
-                block_info,
-                mQRanges[r, 1] - mQRanges[r, 0],
-                seqlen_k,
-                n_cta,
-                attn_r,
-                self.use_per_range_mask,
-            )
-        return active
-
-    @cute.jit
-    def _dkv_block_writer(
-        self,
-        block_info: BlockInfo,
-        mQRanges: cute.Tensor,
-        mKRanges: cute.Tensor,
-        mMaskTypes: Optional[cute.Tensor],
-        mCuBatches: Optional[cute.Tensor],
-        mGroupAllKActive: Optional[cute.Tensor],
-        writer_stride: Int32,
-        r: Int32,
-        kb: Int32,
-    ) -> Int32:
-        first, last = range_chain.block_tiles(mKRanges[r, 0], kb, block_info.tile_n)
-        active = self._dkv_k_tile_is_active(
-            block_info,
-            mQRanges,
-            mKRanges,
-            mMaskTypes,
-            mCuBatches,
-            mGroupAllKActive,
-            r,
-            last,
-        )
-        if not active and first != last:
-            active = self._dkv_k_tile_is_active(
-                block_info,
-                mQRanges,
-                mKRanges,
-                mMaskTypes,
-                mCuBatches,
-                mGroupAllKActive,
-                r,
-                first,
-            )
-        writer = Int32(0)
-        if active:
-            writer = (r + 1) * writer_stride
-        return writer
-
-    @cute.jit
-    def _dkv_lookup_conflict(
-        self,
-        dkv_chain: range_chain.ChainTensors,
-        block_info: BlockInfo,
-        mQRanges: cute.Tensor,
-        mKRanges: cute.Tensor,
-        mMaskTypes: Optional[cute.Tensor],
-        mCuBatches: Optional[cute.Tensor],
-        mGroupAllKActive: Optional[cute.Tensor],
-        batch_idx: Int32,
-        kb: Int32,
-    ) -> Int32:
-        c = batch_idx // dkv_chain.ckpt_stride
-        pred = Int32(dkv_chain.mConflictCkpt[c, kb])
-        if dkv_chain.ckpt_stride > 1:
-            block_rows = self.tile_n * self.cta_group_size
-            r_lo = c * dkv_chain.ckpt_stride
-            r = batch_idx - 1
-            found = cutlass.Boolean(False)
-            while r >= r_lo and not found:
-                k_s = mKRanges[r, 0]
-                k_e = mKRanges[r, 1]
-                if (
-                    k_e > k_s
-                    and k_s // block_rows <= kb
-                    and (k_e - 1) // block_rows >= kb
-                ):
-                    w = self._dkv_block_writer(
-                        block_info,
-                        mQRanges,
-                        mKRanges,
-                        mMaskTypes,
-                        mCuBatches,
-                        mGroupAllKActive,
-                        dkv_chain.writer_stride,
-                        r,
-                        kb,
-                    )
-                    if w > 0:
-                        pred = w
-                        found = cutlass.Boolean(True)
-                r -= 1
-        return pred
-
-    @cute.jit
-    def _dkv_chain_wait(
-        self,
-        dkv_chain: range_chain.ChainTensors,
-        block_info: BlockInfo,
-        mQRanges: cute.Tensor,
-        mKRanges: cute.Tensor,
-        mMaskTypes: Optional[cute.Tensor],
-        mCuBatches: Optional[cute.Tensor],
-        mGroupAllKActive: Optional[cute.Tensor],
-        seqlen_info: SeqlenInfoQK,
-        attn_type: Int32,
-        n_block: Int32,
-        head_idx: Int32,
-        batch_idx: Int32,
-        is_waiter: cutlass.Boolean,
-    ):
-        k_start = seqlen_info.offset_k
-        block_rows = self.tile_n * self.cta_group_size
-        n_cta = n_block // self.cta_group_size
-        left, right, left_weight, right_weight = range_chain.tile_events(
-            k_start,
-            k_start + seqlen_info.seqlen_k,
-            n_cta,
-            block_rows,
-        )
-        if left_weight == 1:
-            if const_expr(self.range_merge):
-                if not self._dkv_k_tile_is_active(
-                    block_info,
-                    mQRanges,
-                    mKRanges,
-                    mMaskTypes,
-                    mCuBatches,
-                    mGroupAllKActive,
-                    batch_idx,
-                    n_cta - 1,
-                ):
-                    left_weight = Int32(2)
-            elif const_expr(self.use_per_range_mask):
-                m_lo_prev, m_hi_prev = block_info.get_m_block_min_max_per_range(
-                    seqlen_info, n_cta - 1, attn_type
-                )
-                if m_lo_prev >= m_hi_prev:
-                    left_weight = Int32(2)
-            else:
-                m_lo_prev, m_hi_prev = block_info.get_m_block_min_max(
-                    seqlen_info, n_cta - 1
-                )
-                if m_lo_prev >= m_hi_prev:
-                    left_weight = Int32(2)
-        if right != left and right_weight == 1:
-            if const_expr(self.range_merge):
-                if not self._dkv_k_tile_is_active(
-                    block_info,
-                    mQRanges,
-                    mKRanges,
-                    mMaskTypes,
-                    mCuBatches,
-                    mGroupAllKActive,
-                    batch_idx,
-                    n_cta + 1,
-                ):
-                    right_weight = Int32(2)
-            elif const_expr(self.use_per_range_mask):
-                m_lo_next, m_hi_next = block_info.get_m_block_min_max_per_range(
-                    seqlen_info, n_cta + 1, attn_type
-                )
-                if m_lo_next >= m_hi_next:
-                    right_weight = Int32(2)
-            else:
-                m_lo_next, m_hi_next = block_info.get_m_block_min_max(
-                    seqlen_info, n_cta + 1
-                )
-                if m_lo_next >= m_hi_next:
-                    right_weight = Int32(2)
-        if const_expr(self.gqa_fold.covers_all_qheads):
-            head_kv = head_idx
-            group_rank = Int32(0)
-        else:
-            head_kv = head_idx // self.gqa_fold.kv_group
-            group_rank = head_idx % self.gqa_fold.kv_group
-        writer = batch_idx * dkv_chain.writer_stride + group_rank + 1
-        if is_waiter:
-            pred_left = writer - 1
-            pred_right = writer - 1
-            if group_rank == 0:
-                pred_left = self._dkv_lookup_conflict(
-                    dkv_chain,
-                    block_info,
-                    mQRanges,
-                    mKRanges,
-                    mMaskTypes,
-                    mCuBatches,
-                    mGroupAllKActive,
-                    batch_idx,
-                    left,
-                )
-                if right != left:
-                    pred_right = self._dkv_lookup_conflict(
-                        dkv_chain,
-                        block_info,
-                        mQRanges,
-                        mKRanges,
-                        mMaskTypes,
-                        mCuBatches,
-                        mGroupAllKActive,
-                        batch_idx,
-                        right,
-                    )
-            range_chain.wait_published(dkv_chain.mChain, left, head_kv, pred_left)
-            if right != left:
-                range_chain.wait_published(dkv_chain.mChain, right, head_kv, pred_right)
-        return (
-            left,
-            right,
-            left_weight,
-            right_weight,
-            writer,
-            head_kv,
-        )
-
-    @cute.jit
-    def _dq_lookup_conflict(
-        self,
-        dq_chain: range_chain.ChainTensors,
-        block_info: BlockInfo,
-        mQRanges: cute.Tensor,
-        mKRanges: cute.Tensor,
-        mMaskTypes: Optional[cute.Tensor],
-        mCuBatches: Optional[cute.Tensor],
-        batch_idx: Int32,
-        block: Int32,
-    ) -> Int32:
-        c = batch_idx // dq_chain.ckpt_stride
-        pred = Int32(dq_chain.mConflictCkpt[c, block])
-        if dq_chain.ckpt_stride > 1:
-            r_lo = c * dq_chain.ckpt_stride
-            r = batch_idx - 1
-            found = cutlass.Boolean(False)
-            while r >= r_lo and not found:
-                k_s = mKRanges[r, 0]
-                k_e = mKRanges[r, 1]
-                seqlen_k = k_e - k_s
-                if seqlen_k > 0:
-                    k_tile_end = Int32(0)
-                    if const_expr(self.range_merge):
-                        assert mCuBatches is not None
-                        row = Int32(mCuBatches[r])
-                        row_end = Int32(mCuBatches[r + 1])
-                        while row < row_end:
-                            q_s = mQRanges[row, 0]
-                            q_e = mQRanges[row, 1]
-                            if (
-                                q_e > q_s
-                                and q_s // self.tile_m <= block
-                                and (q_e - 1) // self.tile_m >= block
-                            ):
-                                attn_r = Int32(MT_MAP.full)
-                                if const_expr(self.use_per_range_mask):
-                                    assert mMaskTypes is not None
-                                    attn_r = Int32(mMaskTypes[row])
-                                k_tile_end = cutlass.max(
-                                    k_tile_end,
-                                    range_chain.dq_pair_k_tile_end_on_block(
-                                        block_info,
-                                        q_e - q_s,
-                                        seqlen_k,
-                                        q_s,
-                                        attn_r,
-                                        block,
-                                        self.use_per_range_mask,
-                                    ),
-                                )
-                            row += 1
-                    else:
-                        q_s = mQRanges[r, 0]
-                        q_e = mQRanges[r, 1]
-                        if (
-                            q_e > q_s
-                            and q_s // self.tile_m <= block
-                            and (q_e - 1) // self.tile_m >= block
-                        ):
-                            attn_r = Int32(MT_MAP.full)
-                            if const_expr(self.use_per_range_mask):
-                                assert mMaskTypes is not None
-                                attn_r = Int32(mMaskTypes[r])
-                            k_tile_end = range_chain.dq_pair_k_tile_end_on_block(
-                                block_info,
-                                q_e - q_s,
-                                seqlen_k,
-                                q_s,
-                                attn_r,
-                                block,
-                                self.use_per_range_mask,
-                            )
-                    if k_tile_end > 0:
-                        pred = r * dq_chain.writer_stride + k_tile_end
-                        found = cutlass.Boolean(True)
-                r -= 1
-        return pred
-
-    @cute.jit
-    def _dq_merge_overlap_scan(
-        self,
-        block_info: BlockInfo,
-        mQRanges: cute.Tensor,
-        mMaskTypes: Optional[cute.Tensor],
-        pair_beg: Int32,
-        pair_cur: Int32,
-        pair_end: Int32,
-        seqlen_k_group: Int32,
-        n_block_cta_group: Int32,
-        left: Int32,
-        right: Int32,
-        need_prev_n: cutlass.Boolean,
-    ):
-        earlier_left = cutlass.Boolean(False)
-        earlier_right = cutlass.Boolean(False)
-        later_left = cutlass.Boolean(False)
-        later_right = cutlass.Boolean(False)
-        prev_n_left = Int32(-1)
-        prev_n_right = Int32(-1)
-        row = pair_beg
-        while row < pair_end:
-            q_s = mQRanges[row, 0]
-            q_e = mQRanges[row, 1]
-            seqlen_q = q_e - q_s
-            if seqlen_q > 0:
-                b0 = q_s // self.tile_m
-                b1 = (q_e - 1) // self.tile_m
-                if b0 <= right and b1 >= left:
-                    attn_r = Int32(MT_MAP.full)
-                    if const_expr(self.use_per_range_mask):
-                        assert mMaskTypes is not None
-                        attn_r = Int32(mMaskTypes[row])
-                    if row != pair_cur:
-                        act_s = q_s
-                        act_e = q_e
-                        if const_expr(self.use_per_range_mask):
-                            if attn_r != MT_MAP.full:
-                                (
-                                    lo_r,
-                                    hi_r,
-                                ) = block_info.get_m_block_min_max_per_range_seqlens(
-                                    seqlen_q,
-                                    seqlen_k_group,
-                                    n_block_cta_group,
-                                    attn_r,
-                                )
-                                act_s = q_s + lo_r * self.tile_m
-                                act_e = cutlass.min(q_s + hi_r * self.tile_m, q_e)
-                        elif const_expr(self.is_static_causal or self.is_local):
-                            lo_r, hi_r = block_info.get_m_block_min_max_seqlens(
-                                seqlen_q, seqlen_k_group, n_block_cta_group
-                            )
-                            act_s = q_s + lo_r * self.tile_m
-                            act_e = cutlass.min(q_s + hi_r * self.tile_m, q_e)
-                        if act_e > act_s:
-                            ab0 = act_s // self.tile_m
-                            ab1 = (act_e - 1) // self.tile_m
-                            if ab0 <= left and left <= ab1:
-                                if row < pair_cur:
-                                    earlier_left = cutlass.Boolean(True)
-                                else:
-                                    later_left = cutlass.Boolean(True)
-                            if right != left and ab0 <= right and right <= ab1:
-                                if row < pair_cur:
-                                    earlier_right = cutlass.Boolean(True)
-                                else:
-                                    later_right = cutlass.Boolean(True)
-                    if need_prev_n:
-                        blk = cutlass.max(left, b0)
-                        blk_hi = cutlass.min(right, b1)
-                        while blk <= blk_hi:
-                            cur_prev = Int32(-1)
-                            if const_expr(
-                                not self.use_per_range_mask
-                                and not self.is_static_causal
-                                and not self.is_local
-                            ):
-                                cur_prev = n_block_cta_group - 1
-                            elif (
-                                const_expr(self.use_per_range_mask)
-                                and attn_r == MT_MAP.full
-                            ):
-                                cur_prev = n_block_cta_group - 1
-                            else:
-                                mt = blk - b0
-                                if (q_s % self.tile_m) != 0 and blk > b0:
-                                    mt = blk - b0 - 1
-                                mt_end = blk - b0
-                                while mt <= mt_end:
-                                    if mt * self.tile_m < seqlen_q:
-                                        if const_expr(self.use_per_range_mask):
-                                            (
-                                                l_m,
-                                                r_m,
-                                            ) = block_info.get_n_block_min_max_per_range_seqlens(
-                                                seqlen_q,
-                                                seqlen_k_group,
-                                                mt,
-                                                attn_r,
-                                            )
-                                        else:
-                                            (
-                                                l_m,
-                                                r_m,
-                                            ) = block_info.get_n_block_min_max_seqlens(
-                                                seqlen_q,
-                                                seqlen_k_group,
-                                                mt,
-                                            )
-                                        if r_m > l_m and l_m < n_block_cta_group:
-                                            cur_prev = cutlass.max(
-                                                cur_prev,
-                                                cutlass.min(n_block_cta_group, r_m) - 1,
-                                            )
-                                    mt += 1
-                            if blk == left:
-                                prev_n_left = cutlass.max(prev_n_left, cur_prev)
-                            if blk == right:
-                                prev_n_right = cutlass.max(prev_n_right, cur_prev)
-                            blk += 1
-            row += 1
-        return (
-            earlier_left,
-            earlier_right,
-            later_left,
-            later_right,
-            prev_n_left,
-            prev_n_right,
-        )
-
-    @cute.jit
-    def _dq_chain_plan(
-        self,
-        dq_chain: range_chain.ChainTensors,
-        block_info: BlockInfo,
-        batch_idx: Int32,
-        n_block_cta_group: Int32,
-        seqlen_info: SeqlenInfoQK,
-        attn_type: Int32,
-        m_block: Int32,
-        m_block_active_start: Int32,
-        m_block_active_end: Int32,
-        mQRanges: cute.Tensor,
-        mKRanges: cute.Tensor,
-        mMaskTypes: Optional[cute.Tensor] = None,
-        mCuBatches: Optional[cute.Tensor] = None,
-        group_pairs: Optional[tuple[Int32, Int32, Int32]] = None,
-        seqlen_k_group: Int32 = Int32(0),
-        group_has_block_overlap: cutlass.Boolean = cutlass.Boolean(False),
-    ):
-        q_start = seqlen_info.offset_q
-        left, right = range_chain.tile_blocks(
-            q_start, q_start + seqlen_info.seqlen_q, m_block, self.tile_m
-        )
-        wait_left = cutlass.Boolean(True)
-        if m_block > m_block_active_start and (q_start % self.tile_m) != 0:
-            wait_left = cutlass.Boolean(False)
-        wait_right = right != left
-
-        arrive_left = cutlass.Boolean(True)
-        arrive_right = cutlass.Boolean(False)
-        if right != left and m_block == m_block_active_end - 1:
-            arrive_right = cutlass.Boolean(True)
-
-        n_min_m = Int32(0)
-        if n_block_cta_group > 0:
-            if const_expr(self.use_per_range_mask):
-                n_min_m, _ = block_info.get_n_block_min_max_per_range_seqlens(
-                    seqlen_info.seqlen_q, seqlen_info.seqlen_k, m_block, attn_type
-                )
-            else:
-                n_min_m, _ = block_info.get_n_block_min_max_seqlens(
-                    seqlen_info.seqlen_q, seqlen_info.seqlen_k, m_block
-                )
-        need_prev_n = n_block_cta_group > 0 and n_min_m == n_block_cta_group
-
-        prev_n_left = n_block_cta_group - 1
-        prev_n_right = n_block_cta_group - 1
-        if n_block_cta_group == 0:
-            prev_n_left = Int32(-1)
-            prev_n_right = Int32(-1)
-        elif need_prev_n:
-            prev_n_left = Int32(-1)
-            prev_n_right = Int32(-1)
-            if not (const_expr(self.range_merge) and group_has_block_overlap):
-                if wait_left and (q_start % self.tile_m) != 0 and m_block > 0:
-                    if const_expr(self.use_per_range_mask):
-                        (
-                            l_prev,
-                            r_prev,
-                        ) = block_info.get_n_block_min_max_per_range_seqlens(
-                            seqlen_info.seqlen_q,
-                            seqlen_info.seqlen_k,
-                            m_block - 1,
-                            attn_type,
-                        )
-                    else:
-                        l_prev, r_prev = block_info.get_n_block_min_max_seqlens(
-                            seqlen_info.seqlen_q, seqlen_info.seqlen_k, m_block - 1
-                        )
-                    if r_prev > l_prev and l_prev < n_block_cta_group:
-                        prev_n_left = cutlass.min(n_block_cta_group, r_prev) - 1
-
-        if const_expr(self.range_merge):
-            if group_has_block_overlap:
-                assert mQRanges is not None and group_pairs is not None
-                (
-                    earlier_left,
-                    earlier_right,
-                    later_left,
-                    later_right,
-                    ov_prev_left,
-                    ov_prev_right,
-                ) = self._dq_merge_overlap_scan(
-                    block_info,
-                    mQRanges,
-                    mMaskTypes,
-                    group_pairs[0],
-                    group_pairs[1],
-                    group_pairs[2],
-                    seqlen_k_group,
-                    n_block_cta_group,
-                    left,
-                    right,
-                    need_prev_n,
-                )
-                if earlier_left:
-                    wait_left = cutlass.Boolean(False)
-                if earlier_right:
-                    wait_right = cutlass.Boolean(False)
-                if later_left:
-                    arrive_left = cutlass.Boolean(False)
-                if later_right:
-                    arrive_right = cutlass.Boolean(False)
-                if need_prev_n:
-                    prev_n_left = ov_prev_left
-                    prev_n_right = ov_prev_right
-
-        wait_pred_left = Int32(-1)
-        if wait_left:
-            if prev_n_left >= 0:
-                wait_pred_left = batch_idx * dq_chain.writer_stride + prev_n_left + 1
-            else:
-                wait_pred_left = self._dq_lookup_conflict(
-                    dq_chain,
-                    block_info,
-                    mQRanges,
-                    mKRanges,
-                    mMaskTypes,
-                    mCuBatches,
-                    batch_idx,
-                    left,
-                )
-
-        wait_pred_right = Int32(-1)
-        if wait_right:
-            if prev_n_right >= 0:
-                wait_pred_right = batch_idx * dq_chain.writer_stride + prev_n_right + 1
-            else:
-                wait_pred_right = self._dq_lookup_conflict(
-                    dq_chain,
-                    block_info,
-                    mQRanges,
-                    mKRanges,
-                    mMaskTypes,
-                    mCuBatches,
-                    batch_idx,
-                    right,
-                )
-
-        return (
-            left,
-            right,
-            wait_pred_left,
-            wait_pred_right,
-            arrive_left,
-            arrive_right,
-        )
-
-    @cute.jit
-    def _dq_chain_wait_planned(
-        self,
-        dq_chain: range_chain.ChainTensors,
-        left: Int32,
-        right: Int32,
-        wait_pred_left: Int32,
-        wait_pred_right: Int32,
-        q_head: Int32,
-    ) -> None:
-        if wait_pred_left >= 0:
-            range_chain.wait_published(dq_chain.mChain, left, q_head, wait_pred_left)
-        if wait_pred_right >= 0:
-            range_chain.wait_published(dq_chain.mChain, right, q_head, wait_pred_right)
-
-    @cute.jit
-    def _dq_chain_arrive_planned(
-        self,
-        dq_chain: range_chain.ChainTensors,
-        dq_writer: Int32,
-        left: Int32,
-        right: Int32,
-        arrive_left: cutlass.Boolean,
-        arrive_right: cutlass.Boolean,
-        q_head: Int32,
-    ) -> None:
-        if arrive_left or arrive_right:
-            cute.arch.fence_acq_rel_gpu()
-            if arrive_left:
-                range_chain.arrive(
-                    dq_chain.mChain,
-                    left,
-                    q_head,
-                    dq_writer,
-                    Int32(2),
-                    self.cta_group_size,
-                )
-            if arrive_right:
-                range_chain.arrive(
-                    dq_chain.mChain,
-                    right,
-                    q_head,
-                    dq_writer,
-                    Int32(2),
-                    self.cta_group_size,
-                )
 
     @cute.jit
     def _dq_semaphore_lock_value(
@@ -8087,7 +7426,7 @@ class FFABwdSm100:
                                         dq_wait_right,
                                         dq_arrive_left,
                                         dq_arrive_right,
-                                    ) = self._dq_chain_plan(
+                                    ) = range_chain.dq_chain_plan(
                                         dq_chain,
                                         block_info,
                                         batch_idx,
@@ -8099,6 +7438,9 @@ class FFABwdSm100:
                                         hi_p,
                                         mQRanges=mQRanges,
                                         mKRanges=mKRanges,
+                                        tile_m=self.tile_m,
+                                        range_merge=True,
+                                        use_per_range_mask=self.use_per_range_mask,
                                         mMaskTypes=mMaskTypes,
                                         mCuBatches=mCuBatches,
                                         group_pairs=group_pairs,
@@ -8162,7 +7504,7 @@ class FFABwdSm100:
 
                                 if const_expr(self.range_dq_chain and stage == 0):
                                     if tidx == 0:
-                                        self._dq_chain_wait_planned(
+                                        range_chain.dq_chain_wait_planned(
                                             dq_chain,
                                             dq_left,
                                             dq_right,
@@ -8240,7 +7582,7 @@ class FFABwdSm100:
                                         )
                                     self.reduce_sync_barrier.arrive_and_wait()
                                 if tidx == 0:
-                                    self._dq_chain_arrive_planned(
+                                    range_chain.dq_chain_arrive_planned(
                                         dq_chain,
                                         dq_writer,
                                         dq_left,
@@ -8248,6 +7590,7 @@ class FFABwdSm100:
                                         dq_arrive_left,
                                         dq_arrive_right,
                                         scratch_head,
+                                        self.cta_group_size,
                                     )
 
                         if const_expr(self.dq_pair_handoff):
@@ -8276,22 +7619,14 @@ class FFABwdSm100:
                         if const_expr(self.range_dq_semaphore):
                             dq_sem_lock = Int32(0)
                             if n_block_cta_group > 0:
-                                if const_expr(self.use_per_range_mask):
-                                    (
-                                        n_min_m,
-                                        _,
-                                    ) = block_info.get_n_block_min_max_per_range_seqlens(
-                                        seqlen_info.seqlen_q,
-                                        seqlen_info.seqlen_k,
-                                        m_block,
-                                        attn_type,
-                                    )
-                                else:
-                                    n_min_m, _ = block_info.get_n_block_min_max_seqlens(
-                                        seqlen_info.seqlen_q,
-                                        seqlen_info.seqlen_k,
-                                        m_block,
-                                    )
+                                n_min_m, _ = range_chain.dq_pair_n_bounds(
+                                    block_info,
+                                    seqlen_info.seqlen_q,
+                                    seqlen_info.seqlen_k,
+                                    m_block,
+                                    attn_type,
+                                    self.use_per_range_mask,
+                                )
                                 dq_sem_lock = n_block_cta_group - n_min_m
                         if const_expr(self.range_dq_chain):
                             dq_left = Int32(0)
@@ -8308,7 +7643,7 @@ class FFABwdSm100:
                                     dq_wait_right,
                                     dq_arrive_left,
                                     dq_arrive_right,
-                                ) = self._dq_chain_plan(
+                                ) = range_chain.dq_chain_plan(
                                     dq_chain,
                                     block_info,
                                     batch_idx,
@@ -8320,6 +7655,9 @@ class FFABwdSm100:
                                     m_block_max,
                                     mQRanges=mQRanges,
                                     mKRanges=mKRanges,
+                                    tile_m=self.tile_m,
+                                    range_merge=False,
+                                    use_per_range_mask=self.use_per_range_mask,
                                     mMaskTypes=mMaskTypes,
                                     mCuBatches=mCuBatches,
                                 )
@@ -8428,7 +7766,7 @@ class FFABwdSm100:
                                 )
                             if const_expr(self.range_dq_chain and stage == 0):
                                 if tidx == 0:
-                                    self._dq_chain_wait_planned(
+                                    range_chain.dq_chain_wait_planned(
                                         dq_chain,
                                         dq_left,
                                         dq_right,
@@ -8586,7 +7924,7 @@ class FFABwdSm100:
                                     cute.arch.cp_async_bulk_wait_group(0, read=False)
                                 self.reduce_sync_barrier.arrive_and_wait()
                             if tidx == 0:
-                                self._dq_chain_arrive_planned(
+                                range_chain.dq_chain_arrive_planned(
                                     dq_chain,
                                     dq_writer,
                                     dq_left,
@@ -8594,6 +7932,7 @@ class FFABwdSm100:
                                     dq_arrive_left,
                                     dq_arrive_right,
                                     scratch_head,
+                                    self.cta_group_size,
                                 )
 
                 if process_tile:
