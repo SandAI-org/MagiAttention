@@ -7349,8 +7349,6 @@ class FFABwdSm100:
                 if const_expr(self.range_merge):
                     if const_expr(self.dq_pair_handoff):
                         seen_active_pair = cutlass.Boolean(False)
-                        active_row_min = Int32(0)
-                        active_row_max = Int32(0)
                     for pj in cutlass.range(pair_cnt, unroll=1):
                         seqlen_pair = SeqlenInfoCls(
                             pair_beg + pj, k_batch_idx=batch_idx
@@ -7360,35 +7358,18 @@ class FFABwdSm100:
                         lo_p, hi_p = block_info.get_m_block_min_max_per_range(
                             seqlen_pair, n_block_cta_group, attn_type_pair
                         )
+                        pair_active = hi_p > lo_p
                         if const_expr(self.dq_pair_handoff):
-                            # Cluster-uniform overlap keeps pair_handoff identical on both CTAs.
                             assert dq_pair_mbar_ptr is not None
-                            needs_handoff = cutlass.Boolean(False)
-                            if hi_p > lo_p:
-                                pair_row_lo = seqlen_pair.offset_q + lo_p * self.tile_m
-                                pair_row_hi = seqlen_pair.offset_q + hi_p * self.tile_m
-                                if seen_active_pair:
-                                    needs_handoff = (
-                                        pair_row_lo < active_row_max
-                                        and pair_row_hi > active_row_min
-                                    )
-                                    active_row_min = cutlass.min(
-                                        active_row_min, pair_row_lo
-                                    )
-                                    active_row_max = cutlass.max(
-                                        active_row_max, pair_row_hi
-                                    )
-                                else:
-                                    seen_active_pair = cutlass.Boolean(True)
-                                    active_row_min = pair_row_lo
-                                    active_row_max = pair_row_hi
+                            needs_handoff = pair_active and seen_active_pair
+                            seen_active_pair = seen_active_pair or pair_active
                             if needs_handoff and tidx == 0:
                                 range_chain.pair_handoff_arrive(
                                     dq_pair_mbar_ptr,
                                     pair_handoff,
                                     cta_rank_in_cluster ^ 1,
                                 )
-                        if hi_p > lo_p:
+                        if pair_active:
                             process_tile = cutlass.Boolean(True)
                         assert mdQacc_tma is not None
                         gdQacc_grid = self._dQacc_reduce_grid(

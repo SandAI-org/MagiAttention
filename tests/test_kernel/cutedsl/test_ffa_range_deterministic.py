@@ -1342,8 +1342,8 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
 
     @with_run_in_mp
     @parameterize("cat_gqa", [False, True])
-    def test_bwd_range_merge_2cta_overlap_gated_pair_handoff(self, cat_gqa: bool):
-        test_case = f"[bwd_2cta_overlap_gated_handoff][cat_gqa={cat_gqa}]"
+    def test_bwd_range_merge_2cta_pair_handoff_with_mixed_masks(self, cat_gqa: bool):
+        test_case = f"[bwd_2cta_pair_handoff_mixed_masks][cat_gqa={cat_gqa}]"
         seed_test_case(test_case)
         relations: Relations = [
             ([0, 900], [0, 256], MT_MAP.full),
