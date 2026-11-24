@@ -955,19 +955,6 @@ msgstr ""
 "属于 {64, 128}；其他配置会抛出 `NotImplementedError`。此时无论 `sm_margin` 取何值，内核均以 "
 "persistent 模式启动。"
 
-#: ../../source/user_guide/env_variables.md:390
-msgid ""
-"The ordered merges cost time, mostly in the backward, which merges the dQ"
-" of the K tiles of a Q block one after another. On B300 the measured "
-"backward was 2.5-2.9x the non-deterministic one for square relations, "
-"about 10x for relations with few Q tiles and many K tiles, and up to "
-"about 11x with heavily overlapping K ranges without `cat_gqa`; the "
-"forward was 1.04-1.11x."
-msgstr ""
-"有序合并会带来额外耗时，主要集中在反向传播中（每个 Q block 需要按顺序依次合并各个 K tile 的 dQ）。在 B300 上测得："
-"对于方形关系，反向耗时约为非确定性版本的 2.5-2.9x；对于 Q tile 少而 K tile 多的关系，约为 10x；在不启用 "
-"`cat_gqa` 且 K ranges 高度重叠时最高约 11x；前向约为 1.04-1.11x。"
-
 #: ../../source/user_guide/env_variables.md:394
 msgid "**MAGI_ATTENTION_PROFILE_MODE**"
 msgstr "**MAGI_ATTENTION_PROFILE_MODE**"
