@@ -49,7 +49,7 @@ from .ffa_bwd_sm120 import FFABwdSm120
 from .ffa_fwd_postprocess import fwd_postprocess
 from .ffa_fwd_sm80 import FFAFwdSm80
 from .ffa_fwd_sm90 import FFAFwdSm90
-from .ffa_fwd_sm100 import FFAFwdSm100, fwd_fp32_o_borrows_kv_smem, fwd_overlaps_sO_sQ
+from .ffa_fwd_sm100 import FFAFwdSm100, fwd_fp32_o_borrows_kv_smem, fwd_o_reuses_q_smem
 from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
@@ -602,7 +602,7 @@ def _flex_flash_attn_fwd(
     ranges_persistent = has_ranges and (
         sm_margin > 0 or fwd_fp32_o_borrow_kv or fwd_deterministic
     )
-    if ranges_persistent and not fwd_overlaps_sO_sQ(
+    if ranges_persistent and not fwd_o_reuses_q_smem(
         head_dim_padded=int(math.ceil(head_dim / 16) * 16),
         head_dim_v_padded=int(math.ceil(head_dim_v / 16) * 16),
         is_split_kv=False,

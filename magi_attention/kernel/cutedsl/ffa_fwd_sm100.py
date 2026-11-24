@@ -209,7 +209,7 @@ def fwd_fp32_o_borrows_kv_smem(
     return estimated_kv_stages >= q_stage * n_chunks + 1
 
 
-def fwd_overlaps_sO_sQ(
+def fwd_o_reuses_q_smem(
     *, head_dim_padded: int, head_dim_v_padded: int, is_split_kv: bool
 ) -> bool:
     return (head_dim_padded == 192 and head_dim_v_padded >= 64) or (
@@ -413,7 +413,7 @@ class FFAFwdSm100:
         # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.maybe_causal and not self.is_local)
         self.s0_s1_barrier = False
 
-        self.overlap_sO_sQ = fwd_overlaps_sO_sQ(
+        self.overlap_sO_sQ = fwd_o_reuses_q_smem(
             head_dim_padded=self.head_dim_padded,
             head_dim_v_padded=self.head_dim_v_padded,
             is_split_kv=self.is_split_kv,
