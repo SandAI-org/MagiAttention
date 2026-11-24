@@ -27,7 +27,7 @@ from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.utils.dtype import to_cute_dtype
 
-from . import range_chain_ckpt
+from . import range_write_index
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import (
     get_aux_tensor_metadata,
@@ -664,10 +664,7 @@ def _flex_flash_attn_fwd(
         if fwd_deterministic:
             assert q_ranges is not None
             num_sm = torch.cuda.get_device_properties(device).multi_processor_count
-            (
-                conflict_ckpt,
-                conflict_ckpt_stride,
-            ) = range_chain_ckpt.build_fwd_conflict_ckpt(
+            conflict_ckpt, conflict_ckpt_stride = range_write_index.build_fwd(
                 q_ranges,
                 num_lock_blocks,
                 num_sm,
@@ -1653,7 +1650,7 @@ def _flex_flash_attn_bwd(
                 group, row_count, output_size=q_ranges.shape[0]
             ).to(torch.int32)
     if range_deterministic:
-        bwd_ckpt_spec = range_chain_ckpt.BwdCkptSpec(
+        bwd_ckpt_spec = range_write_index.BwdCkptSpec(
             tile_m=m_block_size,
             cluster_tile_k=cluster_tile_k,
             mask_type=mask_type,
@@ -1671,7 +1668,7 @@ def _flex_flash_attn_bwd(
         dq_chain_state = torch.zeros(
             num_q_blocks, num_head, 2, dtype=torch.int32, device=device
         )
-        dq_conflict_ckpt, dq_ckpt_stride = range_chain_ckpt.build_bwd_dq_conflict_ckpt(
+        dq_conflict_ckpt, dq_ckpt_stride = range_write_index.build_bwd_dq(
             bwd_ckpt_spec,
             q_ranges,
             k_ranges,
@@ -1693,7 +1690,7 @@ def _flex_flash_attn_bwd(
             dkv_conflict_ckpt,
             dkv_ckpt_stride,
             dkv_group_all_k_active,
-        ) = range_chain_ckpt.build_bwd_dkv_conflict_ckpt_and_all_k_active(
+        ) = range_write_index.build_bwd_dkv(
             bwd_ckpt_spec,
             q_ranges,
             k_ranges,

@@ -22,7 +22,7 @@ from unittest import TestCase, mock
 import torch
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.kernel.cutedsl import flex_flash_attn_func, range_chain_ckpt
+from magi_attention.kernel.cutedsl import flex_flash_attn_func, range_write_index
 from magi_attention.kernel.cutedsl.cache_utils import JITCache
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
@@ -533,7 +533,7 @@ class _RangeDetHelpers:
 
     def _many_ranges(self) -> int:
         num_ranges = self.num_sm + 64
-        _, ckpt_stride = range_chain_ckpt.conflict_ckpt_shape(num_ranges, self.num_sm)
+        _, ckpt_stride = range_write_index.conflict_ckpt_shape(num_ranges, self.num_sm)
         assert ckpt_stride > 1
         return num_ranges
 

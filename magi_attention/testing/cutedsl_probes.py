@@ -22,7 +22,7 @@ from cutlass import Int32, Int64
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import dsl_user_op
 
-from magi_attention.kernel.cutedsl import range_chain
+from magi_attention.kernel.cutedsl import range_write_order
 from magi_attention.kernel.cutedsl.cache_utils import JITCache
 from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
@@ -153,7 +153,7 @@ def delay_injection(point: DelayPoint, seed: int, max_ns: int) -> Iterator[None]
             )
         )
     elif point is DelayPoint.PAIR_ARRIVE:
-        pair_handoff_arrive = range_chain.pair_handoff_arrive
+        pair_handoff_arrive = range_write_order.pair_handoff_arrive
 
         def delayed_pair_handoff_arrive(mbar, handoff, peer):
             odd_block_sleep(seed, max_ns)
@@ -161,19 +161,21 @@ def delay_injection(point: DelayPoint, seed: int, max_ns: int) -> Iterator[None]
 
         stack.enter_context(
             mock.patch.object(
-                range_chain, "pair_handoff_arrive", delayed_pair_handoff_arrive
+                range_write_order, "pair_handoff_arrive", delayed_pair_handoff_arrive
             )
         )
     else:
         assert point is DelayPoint.CHAIN_WAIT
-        wait_published = range_chain.wait_published
+        wait_published = range_write_order.wait_published
 
         def delayed_wait_published(mChain, block, head, writer):
             odd_block_sleep(seed, max_ns)
             wait_published(mChain, block, head, writer)
 
         stack.enter_context(
-            mock.patch.object(range_chain, "wait_published", delayed_wait_published)
+            mock.patch.object(
+                range_write_order, "wait_published", delayed_wait_published
+            )
         )
     with stack:
         yield

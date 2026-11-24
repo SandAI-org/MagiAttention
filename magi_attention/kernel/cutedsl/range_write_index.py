@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Build per-block writer indexes for deterministic range attention."""
 
 from dataclasses import dataclass
 from typing import Optional
@@ -25,7 +26,7 @@ from cutlass import Int32, Uint8, const_expr
 # isort: split
 from quack.compile_utils import make_fake_tensor as fake_tensor
 
-from . import range_chain
+from . import range_write_order
 from .block_info import BlockInfo
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import elem_pointer
@@ -243,7 +244,7 @@ class _BwdDQConflictChunkMax:
                     b = q_s // spec.tile_m + lane
                     last_b = (q_e - 1) // spec.tile_m
                     while b <= last_b:
-                        k_tile_end = range_chain.dq_pair_k_tile_end_on_block(
+                        k_tile_end = range_write_order.dq_pair_k_tile_end_on_block(
                             block_info,
                             seqlen_q,
                             seqlen_k,
@@ -355,7 +356,7 @@ class _BwdDKVConflictChunkMax:
                     kb = k_s // spec.cluster_tile_k + lane
                     last_kb = (k_e - 1) // spec.cluster_tile_k
                     while kb <= last_kb:
-                        if range_chain.dkv_pair_is_active_on_block(
+                        if range_write_order.dkv_pair_is_active_on_block(
                             block_info,
                             seqlen_q,
                             seqlen_k,
@@ -376,10 +377,10 @@ class _BwdDKVConflictChunkMax:
                         kb += cute.arch.WARP_SIZE
 
 
-_PREFIX_MAX_CACHE = get_jit_cache("range_chain_prefix_max")
-_FWD_CKPT_CACHE = get_jit_cache("range_chain_fwd_ckpt")
-_BWD_DQ_CKPT_CACHE = get_jit_cache("range_chain_bwd_dq_ckpt")
-_BWD_DKV_CKPT_CACHE = get_jit_cache("range_chain_bwd_dkv_ckpt")
+_PREFIX_MAX_CACHE = get_jit_cache("range_write_index_prefix_max")
+_FWD_CKPT_CACHE = get_jit_cache("range_write_index_fwd_ckpt")
+_BWD_DQ_CKPT_CACHE = get_jit_cache("range_write_index_bwd_dq_ckpt")
+_BWD_DKV_CKPT_CACHE = get_jit_cache("range_write_index_bwd_dkv_ckpt")
 
 
 def _fake_i32(*shape):
@@ -418,7 +419,7 @@ def _run_conflict_prefix_max(ckpt: torch.Tensor) -> None:
     _PREFIX_MAX_CACHE[key](ckpt, num_ckpts, num_blocks)
 
 
-def build_fwd_conflict_ckpt(
+def build_fwd(
     q_ranges: torch.Tensor,
     num_blocks: int,
     max_ckpts: int,
@@ -452,7 +453,7 @@ def build_fwd_conflict_ckpt(
     return ckpt, ckpt_stride
 
 
-def build_bwd_dq_conflict_ckpt(
+def build_bwd_dq(
     spec: BwdCkptSpec,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -499,7 +500,7 @@ def build_bwd_dq_conflict_ckpt(
     return ckpt, ckpt_stride
 
 
-def build_bwd_dkv_conflict_ckpt_and_all_k_active(
+def build_bwd_dkv(
     spec: BwdCkptSpec,
     q_ranges: torch.Tensor,
     k_ranges: torch.Tensor,
@@ -512,7 +513,7 @@ def build_bwd_dkv_conflict_ckpt_and_all_k_active(
     """Build the backward dK/dV checkpoints ``(num_ckpts, num_blocks)`` and
     return them with ``ckpt_stride`` and ``group_all_k_active``.
 
-    The ranges follow :func:`build_bwd_dq_conflict_ckpt`. Under RangeMerge
+    The ranges follow :func:`build_bwd_dq`. Under RangeMerge
     ``group_all_k_active`` is uint8 ``[num_groups]``: 1 if a single pair of the
     group makes every K tile of the group active, so the attention kernel may
     skip its walk over the pairs of the group. It is ``None`` otherwise.

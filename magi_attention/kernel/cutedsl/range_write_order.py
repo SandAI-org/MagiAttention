@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Order writes to shared output and gradient blocks in deterministic range attention."""
+
 from dataclasses import dataclass
 from typing import Optional
 

@@ -20,7 +20,7 @@ from unittest import TestCase
 import torch
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.kernel.cutedsl import range_chain_ckpt
+from magi_attention.kernel.cutedsl import range_write_index
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
 from magi_attention.testing import parameterize
 from magi_attention.testing.cutedsl_utils import (
@@ -89,7 +89,7 @@ def _ref_fwd_conflict_ckpt(
     block_size: int,
     rows_per_token: int = 1,
 ) -> tuple[torch.Tensor, int]:
-    num_ckpts, ckpt_stride = range_chain_ckpt.conflict_ckpt_shape(len(ranges), num_sm)
+    num_ckpts, ckpt_stride = range_write_index.conflict_ckpt_shape(len(ranges), num_sm)
     want = torch.zeros(num_ckpts, num_blocks, dtype=torch.int32)
     running = torch.zeros(num_blocks, dtype=torch.int32)
     for c in range(num_ckpts):
@@ -117,7 +117,7 @@ def _ref_bwd_conflict_ckpts(
     dkv_stride: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     num_groups = len(k_list)
-    num_ckpts, ckpt_stride = range_chain_ckpt.conflict_ckpt_shape(num_groups, num_sm)
+    num_ckpts, ckpt_stride = range_write_index.conflict_ckpt_shape(num_groups, num_sm)
     want_dq = torch.zeros(num_ckpts, num_q_blocks, dtype=torch.int32)
     want_dkv = torch.zeros(num_ckpts, num_k_blocks, dtype=torch.int32)
     run_dq = torch.zeros(num_q_blocks, dtype=torch.int32)
@@ -197,7 +197,7 @@ _BWD_MERGE_FIXTURE = (
 
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestRangeChainCkpt(TestCase):
+class TestRangeWriteIndex(TestCase):
     def setUp(self) -> None:
         self.device = torch.cuda.current_device()
 
@@ -217,7 +217,7 @@ class TestRangeChainCkpt(TestCase):
         ]
         num_blocks = max(e for _, e in ranges) // block_size + 2
         q_ranges = to_ranges_tensor(ranges, self.device)
-        ckpt, ckpt_stride = range_chain_ckpt.build_fwd_conflict_ckpt(
+        ckpt, ckpt_stride = range_write_index.build_fwd(
             q_ranges, num_blocks, num_sm, block_size, rows_per_token=1
         )
         want, want_stride = _ref_fwd_conflict_ckpt(
@@ -233,7 +233,7 @@ class TestRangeChainCkpt(TestCase):
         num_blocks = 130 * rows_per_token // block_size + 2
         q_ranges = to_ranges_tensor(ranges, self.device)
         for num_sm in (2, 16):
-            ckpt, ckpt_stride = range_chain_ckpt.build_fwd_conflict_ckpt(
+            ckpt, ckpt_stride = range_write_index.build_fwd(
                 q_ranges, num_blocks, num_sm, block_size, rows_per_token=rows_per_token
             )
             want, want_stride = _ref_fwd_conflict_ckpt(
@@ -280,13 +280,13 @@ class TestRangeChainCkpt(TestCase):
         num_k_blocks = max(e for _, e in k_list) // cluster_tile_k + 2
         dq_stride, dkv_stride = 8, 4
 
-        spec = range_chain_ckpt.BwdCkptSpec(
+        spec = range_write_index.BwdCkptSpec(
             tile_m=tile_m,
             cluster_tile_k=cluster_tile_k,
             mask_type=case.mask_type,
             range_merge=case.range_merge,
         )
-        dq_ckpt, dq_ckpt_stride = range_chain_ckpt.build_bwd_dq_conflict_ckpt(
+        dq_ckpt, dq_ckpt_stride = range_write_index.build_bwd_dq(
             spec,
             q_ranges,
             k_ranges,
@@ -300,7 +300,7 @@ class TestRangeChainCkpt(TestCase):
             dkv_ckpt,
             dkv_ckpt_stride,
             all_k_active,
-        ) = range_chain_ckpt.build_bwd_dkv_conflict_ckpt_and_all_k_active(
+        ) = range_write_index.build_bwd_dkv(
             spec,
             q_ranges,
             k_ranges,

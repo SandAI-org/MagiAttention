@@ -44,7 +44,7 @@ from magi_attention.utils.version import is_cutedsl_version_ge
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
-from . import range_chain, sm100_utils
+from . import range_write_order, sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
@@ -5007,7 +5007,7 @@ class FFAFwdSm100:
                                 chain_right,
                                 chain_left_weight,
                                 chain_right_weight,
-                            ) = range_chain.tile_events(
+                            ) = range_write_order.tile_events(
                                 row_offset,
                                 row_offset + num_rows,
                                 m_tile_idx,
@@ -5024,11 +5024,11 @@ class FFAFwdSm100:
                                         if const_expr(self.pack_gqa)
                                         else 1
                                     )
-                                    range_chain.wait_published(
+                                    range_write_order.wait_published(
                                         mRangeLocks,
                                         chain_left,
                                         head_idx,
-                                        range_chain.lookup_fwd_conflict(
+                                        range_write_order.lookup_fwd_conflict(
                                             mConflictCkpt,
                                             mQRanges,
                                             batch_idx,
@@ -5039,11 +5039,11 @@ class FFAFwdSm100:
                                         ),
                                     )
                                     if chain_right != chain_left:
-                                        range_chain.wait_published(
+                                        range_write_order.wait_published(
                                             mRangeLocks,
                                             chain_right,
                                             head_idx,
-                                            range_chain.lookup_fwd_conflict(
+                                            range_write_order.lookup_fwd_conflict(
                                                 mConflictCkpt,
                                                 mQRanges,
                                                 batch_idx,
@@ -5131,7 +5131,7 @@ class FFAFwdSm100:
                             )
                             if tidx == 0:
                                 if const_expr(self.deterministic):
-                                    range_chain.arrive(
+                                    range_write_order.arrive(
                                         mRangeLocks,
                                         chain_left,
                                         head_idx,
@@ -5139,7 +5139,7 @@ class FFAFwdSm100:
                                         chain_left_weight,
                                     )
                                     if chain_right != chain_left:
-                                        range_chain.arrive(
+                                        range_write_order.arrive(
                                             mRangeLocks,
                                             chain_right,
                                             head_idx,

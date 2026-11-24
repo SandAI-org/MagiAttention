@@ -34,7 +34,7 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
-from . import range_chain, sm100_utils
+from . import range_write_order, sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
@@ -1810,7 +1810,7 @@ class FFABwdSm100:
             mdK_semaphore,
             mdV_semaphore,
             (
-                range_chain.ChainTensors(
+                range_write_order.ChainTensors(
                     mdQChain,
                     mdQConflictCkpt,
                     dq_writer_stride,
@@ -1820,7 +1820,7 @@ class FFABwdSm100:
                 else None
             ),
             (
-                range_chain.ChainTensors(
+                range_write_order.ChainTensors(
                     mdKVChain,
                     mdKVConflictCkpt,
                     Int32(
@@ -1913,8 +1913,8 @@ class FFABwdSm100:
         mdQ_semaphore: Optional[cute.Tensor],
         mdK_semaphore: Optional[cute.Tensor],
         mdV_semaphore: Optional[cute.Tensor],
-        dq_chain: Optional[range_chain.ChainTensors],
-        dkv_chain: Optional[range_chain.ChainTensors],
+        dq_chain: Optional[range_write_order.ChainTensors],
+        dkv_chain: Optional[range_write_order.ChainTensors],
         mDKVGroupAllKActive: Optional[cute.Tensor],
         mQRanges: Optional[cute.Tensor],
         mKRanges: Optional[cute.Tensor],
@@ -5283,7 +5283,7 @@ class FFABwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
         tile_done_mbar_ptr: Optional[cute.Pointer] = None,
-        dkv_chain: Optional[range_chain.ChainTensors] = None,
+        dkv_chain: Optional[range_write_order.ChainTensors] = None,
         mDKVGroupAllKActive: Optional[cute.Tensor] = None,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
@@ -6681,7 +6681,7 @@ class FFABwdSm100:
                         dkv_right_weight,
                         dkv_writer,
                         head_kv,
-                    ) = range_chain.dkv_chain_wait(
+                    ) = range_write_order.dkv_chain_wait(
                         dkv_chain,
                         block_info,
                         mQRanges,
@@ -6765,7 +6765,7 @@ class FFABwdSm100:
                     if tidx == 0:
                         assert dkv_chain is not None
                         cute.arch.fence_acq_rel_gpu()
-                        range_chain.arrive(
+                        range_write_order.arrive(
                             dkv_chain.mChain,
                             dkv_left,
                             head_kv,
@@ -6774,7 +6774,7 @@ class FFABwdSm100:
                             self.cta_group_size,
                         )
                         if dkv_right != dkv_left:
-                            range_chain.arrive(
+                            range_write_order.arrive(
                                 dkv_chain.mChain,
                                 dkv_right,
                                 head_kv,
@@ -6921,7 +6921,7 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
-        dq_chain: Optional[range_chain.ChainTensors] = None,
+        dq_chain: Optional[range_write_order.ChainTensors] = None,
         dq_pair_mbar_ptr: Optional[cute.Pointer] = None,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
@@ -7364,7 +7364,7 @@ class FFABwdSm100:
                             needs_handoff = pair_active and seen_active_pair
                             seen_active_pair = seen_active_pair or pair_active
                             if needs_handoff and tidx == 0:
-                                range_chain.pair_handoff_arrive(
+                                range_write_order.pair_handoff_arrive(
                                     dq_pair_mbar_ptr,
                                     pair_handoff,
                                     cta_rank_in_cluster ^ 1,
@@ -7407,7 +7407,7 @@ class FFABwdSm100:
                                         dq_wait_right,
                                         dq_arrive_left,
                                         dq_arrive_right,
-                                    ) = range_chain.dq_chain_plan(
+                                    ) = range_write_order.dq_chain_plan(
                                         dq_chain,
                                         block_info,
                                         batch_idx,
@@ -7485,7 +7485,7 @@ class FFABwdSm100:
 
                                 if const_expr(self.range_dq_chain and stage == 0):
                                     if tidx == 0:
-                                        range_chain.dq_chain_wait_planned(
+                                        range_write_order.dq_chain_wait_planned(
                                             dq_chain,
                                             dq_left,
                                             dq_right,
@@ -7496,7 +7496,7 @@ class FFABwdSm100:
                                 # Placed after TMEM consumer_release so peer sync does not block dQ MMA.
                                 if const_expr(self.dq_pair_handoff and stage == 0):
                                     if needs_handoff and it == 0 and tidx == 0:
-                                        range_chain.pair_handoff_wait(
+                                        range_write_order.pair_handoff_wait(
                                             dq_pair_mbar_ptr, pair_handoff
                                         )
 
@@ -7563,7 +7563,7 @@ class FFABwdSm100:
                                         )
                                     self.reduce_sync_barrier.arrive_and_wait()
                                 if tidx == 0:
-                                    range_chain.dq_chain_arrive_planned(
+                                    range_write_order.dq_chain_arrive_planned(
                                         dq_chain,
                                         dq_writer,
                                         dq_left,
@@ -7600,7 +7600,7 @@ class FFABwdSm100:
                         if const_expr(self.range_dq_semaphore):
                             dq_sem_lock = Int32(0)
                             if n_block_cta_group > 0:
-                                n_min_m, _ = range_chain.dq_pair_n_bounds(
+                                n_min_m, _ = range_write_order.dq_pair_n_bounds(
                                     block_info,
                                     seqlen_info.seqlen_q,
                                     seqlen_info.seqlen_k,
@@ -7624,7 +7624,7 @@ class FFABwdSm100:
                                     dq_wait_right,
                                     dq_arrive_left,
                                     dq_arrive_right,
-                                ) = range_chain.dq_chain_plan(
+                                ) = range_write_order.dq_chain_plan(
                                     dq_chain,
                                     block_info,
                                     batch_idx,
@@ -7747,7 +7747,7 @@ class FFABwdSm100:
                                 )
                             if const_expr(self.range_dq_chain and stage == 0):
                                 if tidx == 0:
-                                    range_chain.dq_chain_wait_planned(
+                                    range_write_order.dq_chain_wait_planned(
                                         dq_chain,
                                         dq_left,
                                         dq_right,
@@ -7905,7 +7905,7 @@ class FFABwdSm100:
                                     cute.arch.cp_async_bulk_wait_group(0, read=False)
                                 self.reduce_sync_barrier.arrive_and_wait()
                             if tidx == 0:
-                                range_chain.dq_chain_arrive_planned(
+                                range_write_order.dq_chain_arrive_planned(
                                     dq_chain,
                                     dq_writer,
                                     dq_left,
