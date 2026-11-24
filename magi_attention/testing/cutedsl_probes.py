@@ -33,7 +33,7 @@ from magi_attention.kernel.cutedsl.tile_scheduler import SingleTileVarlenSchedul
 
 class DelayPoint(enum.Enum):
     START = "start"
-    CHAIN_WAIT = "chain_wait"
+    WRITE_ORDER_WAIT = "write_order_wait"
     PAIR_ARRIVE = "pair_arrive"
 
 
@@ -165,12 +165,12 @@ def delay_injection(point: DelayPoint, seed: int, max_ns: int) -> Iterator[None]
             )
         )
     else:
-        assert point is DelayPoint.CHAIN_WAIT
+        assert point is DelayPoint.WRITE_ORDER_WAIT
         wait_published = range_write_order.wait_published
 
-        def delayed_wait_published(mChain, block, head, writer):
+        def delayed_wait_published(mWriteOrder, block, head, writer):
             odd_block_sleep(seed, max_ns)
-            wait_published(mChain, block, head, writer)
+            wait_published(mWriteOrder, block, head, writer)
 
         stack.enter_context(
             mock.patch.object(

@@ -44,7 +44,7 @@ from magi_attention.utils.version import is_cutedsl_version_ge
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
-from . import range_write_order, sm100_utils
+from . import range_write_index, range_write_order, sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
@@ -792,8 +792,9 @@ class FFAFwdSm100:
         mMaxLogits: Optional[cute.Tensor] = None,
         # tanh cap magnitude; required iff has_softcap.
         softcap: Float32 | None = None,
-        mConflictCkpt: Optional[cute.Tensor] = None,
-        conflict_ckpt_stride: Optional[Int32] = None,
+        mWriteOrder: Optional[cute.Tensor] = None,
+        mWriteIndex: Optional[cute.Tensor] = None,
+        write_index_stride: Optional[Int32] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -830,15 +831,17 @@ class FFAFwdSm100:
             "is_varlen_q compile flag disagrees with mQRanges argument"
         )
         assert (mRangeLocks is not None) == (
-            not self.disable_fwd_atomic_reduction
-        ), "range locks required iff fwd atomic reduction is enabled"
+            not self.disable_fwd_atomic_reduction and not self.deterministic
+        ), "range locks required iff fwd atomic reduction is enabled and not deterministic"
         assert (
-            mConflictCkpt is not None and conflict_ckpt_stride is not None
+            mWriteOrder is not None
+            and mWriteIndex is not None
+            and write_index_stride is not None
         ) == self.deterministic, (
-            "conflict checkpoints and stride are required iff deterministic"
+            "write order, write index and its stride are required iff deterministic"
         )
         if const_expr(self.deterministic):
-            assert mRangeLocks is not None and cute.rank(mRangeLocks) == 3
+            assert mWriteOrder is not None and cute.rank(mWriteOrder) == 3
         assert (
             mCuBatches is not None
         ) == self.range_merge, "RangeMerge requires the cu_batches CSR (and only then)"
@@ -1546,8 +1549,9 @@ class FFAFwdSm100:
             descale_tensors,
             mMaskTypes,
             mRangeLocks,
-            mConflictCkpt,
-            conflict_ckpt_stride,
+            mWriteOrder,
+            mWriteIndex,
+            write_index_stride,
             mCuBatches,
             mMaxLogits,
             blocksparse_tensors,
@@ -1602,8 +1606,9 @@ class FFAFwdSm100:
         descale_tensors: Optional[DescaleTensors],
         mMaskTypes: Optional[cute.Tensor],
         mRangeLocks: Optional[cute.Tensor],
-        mConflictCkpt: Optional[cute.Tensor],
-        conflict_ckpt_stride: Optional[Int32],
+        mWriteOrder: Optional[cute.Tensor],
+        mWriteIndex: Optional[cute.Tensor],
+        write_index_stride: Optional[Int32],
         mCuBatches: Optional[cute.Tensor],
         mMaxLogits: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
@@ -2469,8 +2474,9 @@ class FFAFwdSm100:
                 mCuBatches=mCuBatches,
                 mRangeLocks=mRangeLocks,
                 mQRanges=mQRanges,
-                mConflictCkpt=mConflictCkpt,
-                conflict_ckpt_stride=conflict_ckpt_stride,
+                mWriteOrder=mWriteOrder,
+                mWriteIndex=mWriteIndex,
+                write_index_stride=write_index_stride,
                 borrow_done_mbar_ptr=borrow_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
@@ -4533,8 +4539,9 @@ class FFAFwdSm100:
         mCuBatches: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
         mQRanges: Optional[cute.Tensor] = None,
-        mConflictCkpt: Optional[cute.Tensor] = None,
-        conflict_ckpt_stride: Optional[Int32] = None,
+        mWriteOrder: Optional[cute.Tensor] = None,
+        mWriteIndex: Optional[cute.Tensor] = None,
+        write_index_stride: Optional[Int32] = None,
         borrow_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
@@ -4967,7 +4974,6 @@ class FFAFwdSm100:
                     has_prev = False
                     lock_offset = Int32(0)
                     if const_expr(not self.disable_fwd_atomic_reduction):
-                        assert mRangeLocks is not None
                         m_tile_idx = (
                             m_block * self.q_stage + stage
                         ) * self.cta_group_size + mma_tile_coord_v
@@ -5003,11 +5009,11 @@ class FFAFwdSm100:
                         tile_has_rows = num_rows > m_tile_idx * self.m_block_size
                         if const_expr(self.deterministic):
                             (
-                                chain_left,
-                                chain_right,
-                                chain_left_weight,
-                                chain_right_weight,
-                            ) = range_write_order.tile_events(
+                                left_block,
+                                right_block,
+                                left_weight,
+                                right_weight,
+                            ) = range_write_order.tile_arrivals(
                                 row_offset,
                                 row_offset + num_rows,
                                 m_tile_idx,
@@ -5016,8 +5022,9 @@ class FFAFwdSm100:
                         if tile_has_rows:
                             if const_expr(self.deterministic):
                                 assert mQRanges is not None
-                                assert mConflictCkpt is not None
-                                assert conflict_ckpt_stride is not None
+                                assert mWriteOrder is not None
+                                assert mWriteIndex is not None
+                                assert write_index_stride is not None
                                 if tidx == 0:
                                     rows_per_token = (
                                         self.qhead_per_kvhead
@@ -5025,35 +5032,36 @@ class FFAFwdSm100:
                                         else 1
                                     )
                                     range_write_order.wait_published(
-                                        mRangeLocks,
-                                        chain_left,
+                                        mWriteOrder,
+                                        left_block,
                                         head_idx,
-                                        range_write_order.lookup_fwd_conflict(
-                                            mConflictCkpt,
+                                        range_write_index.lookup_fwd_predecessor(
+                                            mWriteIndex,
                                             mQRanges,
                                             batch_idx,
-                                            chain_left,
+                                            left_block,
                                             self.m_block_size,
                                             rows_per_token,
-                                            conflict_ckpt_stride,
+                                            write_index_stride,
                                         ),
                                     )
-                                    if chain_right != chain_left:
+                                    if right_block != left_block:
                                         range_write_order.wait_published(
-                                            mRangeLocks,
-                                            chain_right,
+                                            mWriteOrder,
+                                            right_block,
                                             head_idx,
-                                            range_write_order.lookup_fwd_conflict(
-                                                mConflictCkpt,
+                                            range_write_index.lookup_fwd_predecessor(
+                                                mWriteIndex,
                                                 mQRanges,
                                                 batch_idx,
-                                                chain_right,
+                                                right_block,
                                                 self.m_block_size,
                                                 rows_per_token,
-                                                conflict_ckpt_stride,
+                                                write_index_stride,
                                             ),
                                         )
                             elif tidx == 0:
+                                assert mRangeLocks is not None
                                 self._acquire_range_locks(
                                     mRangeLocks, head_idx, lock_offset
                                 )
@@ -5131,22 +5139,24 @@ class FFAFwdSm100:
                             )
                             if tidx == 0:
                                 if const_expr(self.deterministic):
+                                    assert mWriteOrder is not None
                                     range_write_order.arrive(
-                                        mRangeLocks,
-                                        chain_left,
+                                        mWriteOrder,
+                                        left_block,
                                         head_idx,
                                         batch_idx + 1,
-                                        chain_left_weight,
+                                        left_weight,
                                     )
-                                    if chain_right != chain_left:
+                                    if right_block != left_block:
                                         range_write_order.arrive(
-                                            mRangeLocks,
-                                            chain_right,
+                                            mWriteOrder,
+                                            right_block,
                                             head_idx,
                                             batch_idx + 1,
-                                            chain_right_weight,
+                                            right_weight,
                                         )
                                 else:
+                                    assert mRangeLocks is not None
                                     self._release_range_locks(
                                         mRangeLocks, head_idx, lock_offset
                                     )

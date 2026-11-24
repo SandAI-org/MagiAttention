@@ -333,7 +333,7 @@ class TileSchedulerArguments(ParamsBase):
     # DYNAMIC schedule only: [1] int32 tile counter, zero before the launch.
     mTileCounter: Optional[cute.Tensor] = None
     # DYNAMIC only: claim every tile from mTileCounter, so a unit is claimed only
-    # after all smaller units (chain progress).
+    # after all smaller units (write order progress).
     claim_first_tile: cutlass.Constexpr[bool] = False
 
 

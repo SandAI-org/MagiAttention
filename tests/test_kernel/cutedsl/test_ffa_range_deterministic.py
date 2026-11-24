@@ -501,7 +501,7 @@ _DISJOINT_Q_RELATIONS: dict[bool, tuple[Relations, int]] = {
     ),
 }
 
-_CKPT_ONE_RANGE: Relations = [([0, 64], [0, 64], MT_MAP.full)]
+_ONE_INDEX_ROW_RELATIONS: Relations = [([0, 64], [0, 64], MT_MAP.full)]
 
 _BWD_UNIT_RELATIONS: dict[int, Relations] = {
     1: [([0, 300], [0, 200], MT_MAP.full)],
@@ -533,8 +533,8 @@ class _RangeDetHelpers:
 
     def _many_ranges(self) -> int:
         num_ranges = self.num_sm + 64
-        _, ckpt_stride = range_write_index.conflict_ckpt_shape(num_ranges, self.num_sm)
-        assert ckpt_stride > 1
+        _, index_stride = range_write_index.write_index_shape(num_ranges, self.num_sm)
+        assert index_stride > 1
         return num_ranges
 
     def _qkv(
@@ -1034,17 +1034,17 @@ class TestFFARangeDeterministicFwd(_RangeDetHelpers, CuteDSLDistTestBase):
         )
 
     @with_run_in_mp
-    def test_fwd_with_more_ranges_than_ckpts_bitwise(self):
+    def test_fwd_with_more_ranges_than_index_rows_bitwise(self):
         if self.rank != 0:
             return
-        test_case = "[fwd_more_ranges_than_ckpts]"
+        test_case = "[fwd_more_ranges_than_index_rows]"
         seed_test_case(test_case)
         relations, total_q, total_k = _many_overlapping_q_relations(self._many_ranges())
         q, k, v = self._qkv(total_q, total_k, group=1, num_head_kv=1)
         with record_fwd_kernels() as built:
-            self._det_fwd(q, k, v, _CKPT_ONE_RANGE)
+            self._det_fwd(q, k, v, _ONE_INDEX_ROW_RELATIONS)
             first = self._det_fwd(q, k, v, relations)
-        # One compiled kernel reads a one-row and a many-row mConflictCkpt.
+        # One compiled kernel reads a one-row and a many-row mWriteIndex.
         (kernel,) = built
         self.assertTrue(kernel.deterministic)
         _assert_bitwise_equal(self._det_fwd(q, k, v, relations), first, test_case)
@@ -1152,7 +1152,7 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
             return
         seed_test_case("[bwd_no_range_sync]")
         # Built up front: copying host range lists to the device syncs.
-        chained = self._bwd_problem(
+        ordered = self._bwd_problem(
             *_overlapping_relations([129, 300], coverage=2, mask_types=[MT_MAP.full]),
             group=1,
         )
@@ -1171,7 +1171,7 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
         )
 
         def run_all() -> None:
-            chained.run(direct_dkv=False)
+            ordered.run(direct_dkv=False)
             disjoint.run(direct_dkv=True, disable_fwd_atomic_reduction=True)
             merged.run(direct_dkv=True, range_merge=merge_plan)
 
@@ -1315,7 +1315,7 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
         self._assert_2cta_handoff_under_delays(
             *_merged_k_relations_2cta_adjacent(),
             cat_gqa=cat_gqa,
-            points=(DelayPoint.CHAIN_WAIT,),
+            points=(DelayPoint.WRITE_ORDER_WAIT,),
             margins=(self.num_sm - 2,),
             seed=7,
             test_case=test_case,
@@ -1333,7 +1333,7 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
         self._assert_2cta_handoff_under_delays(
             *_merged_k_relations_2cta_adjacent(),
             cat_gqa=cat_gqa,
-            points=(DelayPoint.CHAIN_WAIT,),
+            points=(DelayPoint.WRITE_ORDER_WAIT,),
             margins=(0, self.num_sm - 2),
             seed=7,
             test_case=test_case,
@@ -1359,7 +1359,7 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
             900,
             450,
             cat_gqa=cat_gqa,
-            points=(DelayPoint.CHAIN_WAIT, DelayPoint.PAIR_ARRIVE),
+            points=(DelayPoint.WRITE_ORDER_WAIT, DelayPoint.PAIR_ARRIVE),
             margins=(0, self.num_sm - 2),
             seed=23,
             test_case=test_case,
@@ -1431,7 +1431,7 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
                 (0, 1, self.num_sm - 2 * cluster, self.num_sm - cluster),
                 test_case,
             )
-            with delay_injection(DelayPoint.CHAIN_WAIT, seed=11, max_ns=15_000):
+            with delay_injection(DelayPoint.WRITE_ORDER_WAIT, seed=11, max_ns=15_000):
                 _assert_bitwise_equal(
                     run(self.num_sm - 2 * cluster), first, f"{test_case}[delay]"
                 )
@@ -1483,7 +1483,7 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
             self.assertTrue(
                 kernel.use_dense_dqacc_for_ranges and kernel.range_dq_semaphore
             )
-            self.assertFalse(kernel.range_dq_chain or kernel.dQ_rowmajor_accum)
+            self.assertFalse(kernel.range_dq_write_order or kernel.dQ_rowmajor_accum)
             for margin in (1, self.num_sm - 2 * cluster, self.num_sm - cluster):
                 _assert_bitwise_equal(
                     run(margin), first, f"{test_case}[margin={margin}]"
@@ -1625,8 +1625,8 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
 
     @with_run_in_mp
     @parameterize("mode", ["dq_and_dkv", "range_merge", "overlapping_k"])
-    def test_bwd_with_more_ranges_than_ckpts_bitwise(self, mode: str):
-        test_case = f"[bwd_more_ranges_than_ckpts][{mode}]"
+    def test_bwd_with_more_ranges_than_index_rows_bitwise(self, mode: str):
+        test_case = f"[bwd_more_ranges_than_index_rows][{mode}]"
         seed_test_case(test_case)
         num_ranges = self._many_ranges()
         if mode == "dq_and_dkv":
@@ -1635,16 +1635,18 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
             )
             with _with_2cta(True):
                 with record_bwd_kernels() as built:
-                    # One compiled kernel reads a one-row and a many-row mConflictCkpt.
+                    # One compiled kernel reads a one-row and a many-row mWriteIndex.
                     _flex_flash_attn_bwd(
                         *prob.tensors(),
-                        **self._range_args(_CKPT_ONE_RANGE),
+                        **self._range_args(_ONE_INDEX_ROW_RELATIONS),
                         disable_bwd_dkv_atomic_reduction=False,
                         deterministic=True,
                     )
                     first = prob.run(direct_dkv=False)
                 (kernel,) = built
-                self.assertTrue(kernel.range_dq_chain and kernel.range_dkv_chain)
+                self.assertTrue(
+                    kernel.range_dq_write_order and kernel.range_dkv_write_order
+                )
                 self.assertFalse(kernel.range_merge)
                 _assert_bitwise_equal(prob.run(direct_dkv=False), first, test_case)
         elif mode == "range_merge":
@@ -1657,8 +1659,8 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
             with record_bwd_kernels() as built:
                 first = prob.run(direct_dkv=True, range_merge=plan)
             (kernel,) = built
-            self.assertTrue(kernel.range_merge and kernel.range_dq_chain)
-            self.assertFalse(kernel.range_dkv_chain)
+            self.assertTrue(kernel.range_merge and kernel.range_dq_write_order)
+            self.assertFalse(kernel.range_dkv_write_order)
             _assert_bitwise_equal(
                 prob.run(direct_dkv=True, range_merge=plan), first, test_case
             )
@@ -1672,7 +1674,7 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
             with record_bwd_kernels() as built:
                 first = prob.run(direct_dkv=False)
             (kernel,) = built
-            self.assertTrue(kernel.range_dkv_chain)
+            self.assertTrue(kernel.range_dkv_write_order)
             _assert_bitwise_equal(prob.run(direct_dkv=False), first, test_case)
         _assert_grads_close(first, prob.ref_grads(), test_case)
 

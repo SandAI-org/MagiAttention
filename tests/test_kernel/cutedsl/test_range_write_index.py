@@ -32,7 +32,7 @@ from magi_attention.testing.precision import assert_equal
 
 
 @dataclass(frozen=True)
-class _BwdCkptCase:
+class _BwdWriteIndexCase:
     range_merge: bool = False
     mask_type: int | None = None
 
@@ -82,28 +82,30 @@ def _ref_dq_pair_k_tile_end_on_block(
     return k_tile_end
 
 
-def _ref_fwd_conflict_ckpt(
+def _ref_fwd_write_index(
     ranges: list[list[int]],
     num_blocks: int,
     num_sm: int,
     block_size: int,
     rows_per_token: int = 1,
 ) -> tuple[torch.Tensor, int]:
-    num_ckpts, ckpt_stride = range_write_index.conflict_ckpt_shape(len(ranges), num_sm)
-    want = torch.zeros(num_ckpts, num_blocks, dtype=torch.int32)
+    num_index_rows, index_stride = range_write_index.write_index_shape(
+        len(ranges), num_sm
+    )
+    want = torch.zeros(num_index_rows, num_blocks, dtype=torch.int32)
     running = torch.zeros(num_blocks, dtype=torch.int32)
-    for c in range(num_ckpts):
+    for c in range(num_index_rows):
         want[c] = running
-        for r in range(c * ckpt_stride, min(len(ranges), (c + 1) * ckpt_stride)):
+        for r in range(c * index_stride, min(len(ranges), (c + 1) * index_stride)):
             s, e = ranges[r]
             if e > s:
                 lo = s * rows_per_token // block_size
                 hi = (e * rows_per_token - 1) // block_size + 1
                 running[lo:hi] = r + 1
-    return want, ckpt_stride
+    return want, index_stride
 
 
-def _ref_bwd_conflict_ckpts(
+def _ref_bwd_write_index(
     q_list: list[list[int]],
     k_list: list[list[int]],
     masks: list[int],
@@ -117,18 +119,20 @@ def _ref_bwd_conflict_ckpts(
     dkv_stride: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     num_groups = len(k_list)
-    num_ckpts, ckpt_stride = range_write_index.conflict_ckpt_shape(num_groups, num_sm)
-    want_dq = torch.zeros(num_ckpts, num_q_blocks, dtype=torch.int32)
-    want_dkv = torch.zeros(num_ckpts, num_k_blocks, dtype=torch.int32)
+    num_index_rows, index_stride = range_write_index.write_index_shape(
+        num_groups, num_sm
+    )
+    want_dq = torch.zeros(num_index_rows, num_q_blocks, dtype=torch.int32)
+    want_dkv = torch.zeros(num_index_rows, num_k_blocks, dtype=torch.int32)
     run_dq = torch.zeros(num_q_blocks, dtype=torch.int32)
     run_dkv = torch.zeros(num_k_blocks, dtype=torch.int32)
     want_all_k = torch.zeros(num_groups, dtype=torch.uint8)
 
-    for c in range(num_ckpts):
+    for c in range(num_index_rows):
         want_dq[c] = run_dq
         want_dkv[c] = run_dkv
-        g_lo = c * ckpt_stride
-        g_hi = min(num_groups, g_lo + ckpt_stride)
+        g_lo = c * index_stride
+        g_hi = min(num_groups, g_lo + index_stride)
         for row, g in enumerate(group_of):
             qs, qe = q_list[row]
             ks, ke = k_list[g]
@@ -163,7 +167,7 @@ def _ref_bwd_conflict_ckpts(
                 if active:
                     run_dkv[kb] = max(int(run_dkv[kb]), (g + 1) * dkv_stride)
 
-    return want_dq, want_dkv, want_all_k, ckpt_stride
+    return want_dq, want_dkv, want_all_k, index_stride
 
 
 _BWD_PLAIN_FIXTURE = (
@@ -202,7 +206,7 @@ class TestRangeWriteIndex(TestCase):
         self.device = torch.cuda.current_device()
 
     @parameterize("num_sm", [1, 2, 16])
-    def test_fwd_conflict_ckpt_matches_reference(self, num_sm: int):
+    def test_fwd_write_index_matches_reference(self, num_sm: int):
         block_size = 128
         ranges = [
             [0, 256],
@@ -217,43 +221,41 @@ class TestRangeWriteIndex(TestCase):
         ]
         num_blocks = max(e for _, e in ranges) // block_size + 2
         q_ranges = to_ranges_tensor(ranges, self.device)
-        ckpt, ckpt_stride = range_write_index.build_fwd(
+        write_index, index_stride = range_write_index.build_fwd(
             q_ranges, num_blocks, num_sm, block_size, rows_per_token=1
         )
-        want, want_stride = _ref_fwd_conflict_ckpt(
-            ranges, num_blocks, num_sm, block_size
-        )
-        self.assertEqual(ckpt_stride, want_stride)
-        assert_equal(ckpt.cpu(), want, print_no_mismatch=False)
+        want, want_stride = _ref_fwd_write_index(ranges, num_blocks, num_sm, block_size)
+        self.assertEqual(index_stride, want_stride)
+        assert_equal(write_index.cpu(), want, print_no_mismatch=False)
 
     @parameterize("rows_per_token", [2, 4])
-    def test_fwd_conflict_ckpt_scales_packed_row_blocks(self, rows_per_token: int):
+    def test_fwd_write_index_scales_packed_row_blocks(self, rows_per_token: int):
         block_size = 128
         ranges = [[61, 100], [32, 64], [0, 33], [70, 70], [90, 130], [10, 80]]
         num_blocks = 130 * rows_per_token // block_size + 2
         q_ranges = to_ranges_tensor(ranges, self.device)
         for num_sm in (2, 16):
-            ckpt, ckpt_stride = range_write_index.build_fwd(
+            write_index, index_stride = range_write_index.build_fwd(
                 q_ranges, num_blocks, num_sm, block_size, rows_per_token=rows_per_token
             )
-            want, want_stride = _ref_fwd_conflict_ckpt(
+            want, want_stride = _ref_fwd_write_index(
                 ranges, num_blocks, num_sm, block_size, rows_per_token=rows_per_token
             )
-            self.assertEqual(ckpt_stride, want_stride)
-            assert_equal(ckpt.cpu(), want, print_no_mismatch=False)
+            self.assertEqual(index_stride, want_stride)
+            assert_equal(write_index.cpu(), want, print_no_mismatch=False)
 
     @parameterize(
         "case",
         [
-            _BwdCkptCase(range_merge=False, mask_type=None),
-            _BwdCkptCase(range_merge=False, mask_type=MT_MAP.full),
-            _BwdCkptCase(range_merge=False, mask_type=MT_MAP.causal),
-            _BwdCkptCase(range_merge=True, mask_type=None),
+            _BwdWriteIndexCase(range_merge=False, mask_type=None),
+            _BwdWriteIndexCase(range_merge=False, mask_type=MT_MAP.full),
+            _BwdWriteIndexCase(range_merge=False, mask_type=MT_MAP.causal),
+            _BwdWriteIndexCase(range_merge=True, mask_type=None),
         ],
     )
     @parameterize("num_sm", [2, 16])
-    def test_bwd_dq_and_dkv_conflict_ckpt_match_reference(
-        self, case: _BwdCkptCase, num_sm: int
+    def test_bwd_dq_and_dkv_write_index_match_reference(
+        self, case: _BwdWriteIndexCase, num_sm: int
     ):
         tile_m, cluster_tile_k = 128, 256
         q_list, k_list, base_masks, group_of = (
@@ -280,13 +282,13 @@ class TestRangeWriteIndex(TestCase):
         num_k_blocks = max(e for _, e in k_list) // cluster_tile_k + 2
         dq_stride, dkv_stride = 8, 4
 
-        spec = range_write_index.BwdCkptSpec(
+        spec = range_write_index.BwdWriteIndexSpec(
             tile_m=tile_m,
             cluster_tile_k=cluster_tile_k,
             mask_type=case.mask_type,
             range_merge=case.range_merge,
         )
-        dq_ckpt, dq_ckpt_stride = range_write_index.build_bwd_dq(
+        dq_write_index, dq_index_stride = range_write_index.build_bwd_dq(
             spec,
             q_ranges,
             k_ranges,
@@ -297,8 +299,8 @@ class TestRangeWriteIndex(TestCase):
             dq_stride,
         )
         (
-            dkv_ckpt,
-            dkv_ckpt_stride,
+            dkv_write_index,
+            dkv_index_stride,
             all_k_active,
         ) = range_write_index.build_bwd_dkv(
             spec,
@@ -310,7 +312,7 @@ class TestRangeWriteIndex(TestCase):
             num_sm,
             dkv_stride,
         )
-        want_dq, want_dkv, want_all_k, want_stride = _ref_bwd_conflict_ckpts(
+        want_dq, want_dkv, want_all_k, want_stride = _ref_bwd_write_index(
             q_list,
             k_list,
             masks,
@@ -324,10 +326,10 @@ class TestRangeWriteIndex(TestCase):
             dkv_stride,
         )
 
-        self.assertEqual(dq_ckpt_stride, want_stride)
-        self.assertEqual(dkv_ckpt_stride, want_stride)
-        assert_equal(dq_ckpt.cpu(), want_dq, print_no_mismatch=False)
-        assert_equal(dkv_ckpt.cpu(), want_dkv, print_no_mismatch=False)
+        self.assertEqual(dq_index_stride, want_stride)
+        self.assertEqual(dkv_index_stride, want_stride)
+        assert_equal(dq_write_index.cpu(), want_dq, print_no_mismatch=False)
+        assert_equal(dkv_write_index.cpu(), want_dkv, print_no_mismatch=False)
         if case.range_merge:
             self.assertIsNotNone(all_k_active)
             assert all_k_active is not None
