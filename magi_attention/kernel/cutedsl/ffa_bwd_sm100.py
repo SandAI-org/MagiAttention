@@ -7045,7 +7045,11 @@ class FFABwdSm100:
         dQ_tma_store_producer_state = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Producer, self.sdQacc_stage
         )
-        read_flag = const_expr(not self.deterministic)
+        # Semaphore releases rely on full per-store waits; write order arrives
+        # follow a full drain of each m tile.
+        read_flag = const_expr(
+            not (self.dense_deterministic or self.range_dq_semaphore)
+        )
         pair_handoff = Int32(0) if const_expr(self.dq_pair_handoff) else None
 
         # /////////////////////////////////////////////////////////////////////////////
@@ -7453,6 +7457,14 @@ class FFABwdSm100:
 
                             n_reduce_stages = const_expr(cute.size(tdQrdQ, mode=[1]))
                             for stage in cutlass.range_constexpr(n_reduce_stages):
+                                store_read = const_expr(
+                                    read_flag
+                                    and not (
+                                        self.range_dq_write_order
+                                        and self.sdQacc_stage == 1
+                                        and stage == n_reduce_stages - 1
+                                    )
+                                )
                                 smem_idx = dQ_tma_store_producer_state.index
                                 rows_valid = (
                                     self._q_rows(seqlen_pair.seqlen_q)
@@ -7523,7 +7535,7 @@ class FFABwdSm100:
                                         )
                                         cute.arch.cp_async_bulk_commit_group()
                                         cute.arch.cp_async_bulk_wait_group(
-                                            self.sdQacc_stage - 1, read=read_flag
+                                            self.sdQacc_stage - 1, read=store_read
                                         )
                                 else:
                                     if is_tma_warp:
@@ -7552,7 +7564,7 @@ class FFABwdSm100:
                                             )
                                         cute.arch.cp_async_bulk_commit_group()
                                         cute.arch.cp_async_bulk_wait_group(
-                                            self.sdQacc_stage - 1, read=read_flag
+                                            self.sdQacc_stage - 1, read=store_read
                                         )
 
                                 # Sync after S2G copy
@@ -7669,6 +7681,14 @@ class FFABwdSm100:
 
                         n_reduce_stages = const_expr(cute.size(tdQrdQ, mode=[1]))
                         for stage in cutlass.range_constexpr(n_reduce_stages):
+                            store_read = const_expr(
+                                read_flag
+                                and not (
+                                    self.range_dq_write_order
+                                    and self.sdQacc_stage == 1
+                                    and stage == n_reduce_stages - 1
+                                )
+                            )
                             # R2S copy dQacc (bulk path)
                             smem_idx = dQ_tma_store_producer_state.index
                             if const_expr(not self.dQ_rowmajor_accum):
@@ -7806,7 +7826,7 @@ class FFABwdSm100:
                                     )
                                     cute.arch.cp_async_bulk_commit_group()
                                     cute.arch.cp_async_bulk_wait_group(
-                                        self.sdQacc_stage - 1, read=read_flag
+                                        self.sdQacc_stage - 1, read=store_read
                                     )
                                 elif is_tma_warp:
                                     cute.arch.cp_async_bulk_wait_group(
@@ -7841,10 +7861,9 @@ class FFABwdSm100:
                                         )
                                     cute.arch.cp_async_bulk_commit_group()
                                     # Retire only the buffer this stage is about to
-                                    # reuse; the tail drain after the m_block loop
-                                    # retires the rest.
+                                    # reuse; later drains retire the rest.
                                     cute.arch.cp_async_bulk_wait_group(
-                                        self.sdQacc_stage - 1, read=read_flag
+                                        self.sdQacc_stage - 1, read=store_read
                                     )
                                 elif is_tma_warp:
                                     cute.arch.cp_async_bulk_wait_group(
@@ -7921,9 +7940,11 @@ class FFABwdSm100:
                                 )
 
                 if process_tile:
-                    if is_tma_warp:
-                        cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
-                    self.reduce_sync_barrier.arrive_and_wait()
+                    # The write order path fully drains every m tile before its arrive.
+                    if const_expr(not self.range_dq_write_order):
+                        if is_tma_warp:
+                            cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
+                        self.reduce_sync_barrier.arrive_and_wait()
                     # final semaphore release
                     if const_expr(
                         (self.dense_deterministic or self.range_dq_semaphore)
@@ -7956,9 +7977,6 @@ class FFABwdSm100:
                         )
 
             work_tile = tile_scheduler.advance_to_next_work()
-
-        if const_expr(not self.deterministic):
-            cute.arch.cp_async_bulk_wait_group(0, read=True)
 
     @cute.jit
     def epilogue_dK_or_dV_tma(
