@@ -16,6 +16,14 @@
 
 set -euo pipefail
 
+# Log accelerator identity once so runner/platform mismatches are visible in CI output.
+echo "=== accelerator self-check ==="
+nvidia-smi -L || true
+nvidia-smi --query-gpu=name,uuid,memory.total,memory.free,driver_version --format=csv,noheader || true
+echo "runner: ${RUNNER_NAME:-unknown} host: $(hostname 2>/dev/null || true)"
+id || true
+echo "=== end accelerator self-check ==="
+
 prepare_runtime_lock() {
     export CI_DEPENDENCY_RUNTIME_LOCK="${RUNNER_TEMP:-/tmp}/ci-source-dependencies/resolved.json"
 }
