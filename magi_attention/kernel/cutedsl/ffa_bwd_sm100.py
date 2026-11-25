@@ -832,13 +832,10 @@ class FFABwdSm100:
         # tanh cap magnitude; required iff has_softcap.
         softcap: Float32 | None = None,
         mdQWriteOrder: Optional[cute.Tensor] = None,
-        mdQWriteIndex: Optional[cute.Tensor] = None,
+        mdQLast: Optional[cute.Tensor] = None,
         dq_writer_stride: Int32 | None = None,
-        dq_index_stride: Int32 | None = None,
         mdKVWriteOrder: Optional[cute.Tensor] = None,
-        mdKVWriteIndex: Optional[cute.Tensor] = None,
-        dkv_index_stride: Int32 | None = None,
-        mDKVGroupAllKActive: Optional[cute.Tensor] = None,
+        mdKVLast: Optional[cute.Tensor] = None,
         aux_tensors: Optional[list] = None,
         # Block-sparse tensors (Q direction - for iterating m_blocks per n_block):
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -884,9 +881,8 @@ class FFABwdSm100:
         )
         assert (
             mdQWriteOrder is not None
-            and mdQWriteIndex is not None
+            and mdQLast is not None
             and dq_writer_stride is not None
-            and dq_index_stride is not None
         ) == self.range_dq_write_order, (
             "the dQ write order comes with overlapping deterministic ranges"
         )
@@ -924,19 +920,14 @@ class FFABwdSm100:
         self.ranges_dkv_tma = mKRanges is not None and not self.dKV_postprocess
         self.range_dkv_write_order = self.range_deterministic and self.dKV_postprocess
         assert (
-            mdKVWriteOrder is not None
-            and mdKVWriteIndex is not None
-            and dkv_index_stride is not None
+            mdKVWriteOrder is not None and mdKVLast is not None
         ) == self.range_dkv_write_order, (
             "the dK/dV write order comes with reduced dK/dV"
         )
-        assert (mDKVGroupAllKActive is not None) == (
-            self.range_dkv_write_order and self.range_merge
-        ), "mDKVGroupAllKActive comes with deterministic RangeMerge dK/dV"
         if const_expr(self.range_dq_write_order or self.range_dkv_write_order):
             assert (
                 self.gqa_fold.pack_factor == 1 and not self.is_local
-            ), "the write index numbers writers of unpacked, non-local ranges"
+            ), "the write order numbers writers of unpacked, non-local ranges"
 
         mdQacc, mdK, mdV = [
             cutedsl_utils.assume_tensor_aligned(t) for t in (mdQacc, mdK, mdV)
@@ -1814,9 +1805,8 @@ class FFABwdSm100:
             (
                 range_write_order.WriteOrderTensors(
                     mdQWriteOrder,
-                    mdQWriteIndex,
+                    mdQLast,
                     dq_writer_stride,
-                    dq_index_stride,
                 )
                 if const_expr(self.range_dq_write_order)
                 else None
@@ -1824,16 +1814,14 @@ class FFABwdSm100:
             (
                 range_write_order.WriteOrderTensors(
                     mdKVWriteOrder,
-                    mdKVWriteIndex,
+                    mdKVLast,
                     Int32(
                         1 if self.gqa_fold.covers_all_qheads else self.gqa_fold.kv_group
                     ),
-                    dkv_index_stride,
                 )
                 if const_expr(self.range_dkv_write_order)
                 else None
             ),
-            mDKVGroupAllKActive,
             mQRanges,
             mKRanges,
             mSeqUsedQ,
@@ -1917,7 +1905,6 @@ class FFABwdSm100:
         mdV_semaphore: Optional[cute.Tensor],
         dq_write_order: Optional[range_write_order.WriteOrderTensors],
         dkv_write_order: Optional[range_write_order.WriteOrderTensors],
-        mDKVGroupAllKActive: Optional[cute.Tensor],
         mQRanges: Optional[cute.Tensor],
         mKRanges: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
@@ -2792,7 +2779,6 @@ class FFABwdSm100:
                 mCuBatches=mCuBatches,
                 tile_done_mbar_ptr=tile_done_mbar_ptr,
                 dkv_write_order=dkv_write_order,
-                mDKVGroupAllKActive=mDKVGroupAllKActive,
                 mQRanges=mQRanges,
                 mKRanges=mKRanges,
                 is_print_block=is_print_block,
@@ -5286,7 +5272,6 @@ class FFABwdSm100:
         mCuBatches: Optional[cute.Tensor] = None,
         tile_done_mbar_ptr: Optional[cute.Pointer] = None,
         dkv_write_order: Optional[range_write_order.WriteOrderTensors] = None,
-        mDKVGroupAllKActive: Optional[cute.Tensor] = None,
         mQRanges: Optional[cute.Tensor] = None,
         mKRanges: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
@@ -5495,6 +5480,7 @@ class FFABwdSm100:
         consumer_state_dPsum = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.dO_stage
         )
+        dkv_folded = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -6683,6 +6669,7 @@ class FFABwdSm100:
                         dkv_right_weight,
                         dkv_writer,
                         head_kv,
+                        dkv_folded,
                     ) = range_write_order.dkv_wait(
                         dkv_write_order,
                         block_info,
@@ -6690,12 +6677,13 @@ class FFABwdSm100:
                         mKRanges,
                         mMaskTypes,
                         mCuBatches,
-                        mDKVGroupAllKActive,
                         seqlen_info,
                         attn_type,
                         n_block // self.cta_group_size,
                         head_idx,
                         batch_idx,
+                        dkv_folded,
+                        tidx < cute.arch.WARP_SIZE,
                         tidx == 0,
                         self.tile_n * self.cta_group_size,
                         self.gqa_fold.covers_all_qheads,
@@ -7050,6 +7038,7 @@ class FFABwdSm100:
         read_flag = const_expr(
             not (self.dense_deterministic or self.range_dq_semaphore)
         )
+        dq_folded = Int32(0)
         pair_handoff = Int32(0) if const_expr(self.dq_pair_handoff) else None
 
         # /////////////////////////////////////////////////////////////////////////////
@@ -7087,7 +7076,45 @@ class FFABwdSm100:
                     seqlen_info, n_block_cta_group
                 )
 
-            if const_expr(self.range_dq_write_order and self.range_merge):
+            if const_expr(self.range_dq_write_order and not self.range_merge):
+                assert (
+                    dq_write_order is not None
+                    and mQRanges is not None
+                    and mKRanges is not None
+                )
+                if m_block_min < m_block_max and dq_folded < batch_idx:
+                    need_fold = n_block_cta_group == 0
+                    if not need_fold:
+                        n_min_last, _ = range_write_index.dq_pair_n_bounds(
+                            block_info,
+                            seqlen_info.seqlen_q,
+                            seqlen_info.seqlen_k,
+                            m_block_max - 1,
+                            attn_type,
+                            self.use_per_range_mask,
+                        )
+                        need_fold = n_min_last == n_block_cta_group
+                    if need_fold:
+                        range_write_index.fold_dq_last(
+                            block_info,
+                            mQRanges,
+                            mKRanges,
+                            mMaskTypes,
+                            mCuBatches,
+                            dq_write_order.mLast,
+                            cute.arch.block_idx()[0],
+                            dq_folded,
+                            batch_idx,
+                            dq_write_order.writer_stride,
+                            self.tile_m,
+                            False,
+                            self.use_per_range_mask,
+                            tidx,
+                            num_reduce_threads,
+                        )
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        dq_folded = batch_idx
+            elif const_expr(self.range_dq_write_order and self.range_merge):
                 assert (
                     dq_write_order is not None
                     and mQRanges is not None
@@ -7120,6 +7147,58 @@ class FFABwdSm100:
                             prev_b1 = b1_ov
                         pj_ov += 1
                     group_has_block_overlap = not (all_inc or all_dec)
+                if dq_folded < batch_idx:
+                    need_fold = cutlass.Boolean(False)
+                    pj_scan = Int32(0)
+                    while pj_scan < pair_cnt and not need_fold:
+                        row_scan = pair_beg + pj_scan
+                        seqlen_q_scan = mQRanges[row_scan, 1] - mQRanges[row_scan, 0]
+                        if seqlen_q_scan > 0:
+                            attn_scan = Int32(mMaskTypes[row_scan])
+                            (
+                                lo_s,
+                                hi_s,
+                            ) = block_info.get_m_block_min_max_per_range_seqlens(
+                                seqlen_q_scan,
+                                seqlen_info.seqlen_k,
+                                n_block_cta_group,
+                                attn_scan,
+                            )
+                            if hi_s > lo_s:
+                                if n_block_cta_group == 0:
+                                    need_fold = cutlass.Boolean(True)
+                                elif attn_scan != MT_MAP.full:
+                                    n_min_s, _ = range_write_index.dq_pair_n_bounds(
+                                        block_info,
+                                        seqlen_q_scan,
+                                        seqlen_info.seqlen_k,
+                                        hi_s - 1,
+                                        attn_scan,
+                                        True,
+                                    )
+                                    if n_min_s == n_block_cta_group:
+                                        need_fold = cutlass.Boolean(True)
+                        pj_scan += 1
+                    if need_fold:
+                        range_write_index.fold_dq_last(
+                            block_info,
+                            mQRanges,
+                            mKRanges,
+                            mMaskTypes,
+                            mCuBatches,
+                            dq_write_order.mLast,
+                            cute.arch.block_idx()[0],
+                            dq_folded,
+                            batch_idx,
+                            dq_write_order.writer_stride,
+                            self.tile_m,
+                            True,
+                            self.use_per_range_mask,
+                            tidx,
+                            num_reduce_threads,
+                        )
+                        self.reduce_sync_barrier.arrive_and_wait()
+                        dq_folded = batch_idx
 
             delay_semaphore_release = (
                 not self.tile_hdim == 192 and not self.use_block_sparsity
@@ -7426,12 +7505,10 @@ class FFABwdSm100:
                                         lo_p,
                                         hi_p,
                                         mQRanges=mQRanges,
-                                        mKRanges=mKRanges,
                                         tile_m=self.tile_m,
                                         range_merge=True,
                                         use_per_range_mask=self.use_per_range_mask,
                                         mMaskTypes=mMaskTypes,
-                                        mCuBatches=mCuBatches,
                                         group_pairs=group_pairs,
                                         seqlen_k_group=seqlen_info.seqlen_k,
                                         group_has_block_overlap=group_has_block_overlap,
@@ -7651,12 +7728,10 @@ class FFABwdSm100:
                                     m_block_min,
                                     m_block_max,
                                     mQRanges=mQRanges,
-                                    mKRanges=mKRanges,
                                     tile_m=self.tile_m,
                                     range_merge=False,
                                     use_per_range_mask=self.use_per_range_mask,
                                     mMaskTypes=mMaskTypes,
-                                    mCuBatches=mCuBatches,
                                 )
 
                         # Wait for tdQ(i) to be full

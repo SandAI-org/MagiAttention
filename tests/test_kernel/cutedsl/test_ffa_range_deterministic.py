@@ -22,7 +22,7 @@ from unittest import TestCase, mock
 import torch
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.kernel.cutedsl import flex_flash_attn_func, range_write_index
+from magi_attention.kernel.cutedsl import flex_flash_attn_func
 from magi_attention.kernel.cutedsl.cache_utils import JITCache
 from magi_attention.kernel.cutedsl.ffa_bwd_sm100 import FFABwdSm100
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
@@ -532,10 +532,7 @@ class _RangeDetHelpers:
         return (0, 1, self.num_sm - mid * cluster, self.num_sm - cluster, 0)
 
     def _many_ranges(self) -> int:
-        num_ranges = self.num_sm + 64
-        _, index_stride = range_write_index.write_index_shape(num_ranges, self.num_sm)
-        assert index_stride > 1
-        return num_ranges
+        return self.num_sm + 64
 
     def _qkv(
         self,

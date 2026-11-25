@@ -793,8 +793,7 @@ class FFAFwdSm100:
         # tanh cap magnitude; required iff has_softcap.
         softcap: Float32 | None = None,
         mWriteOrder: Optional[cute.Tensor] = None,
-        mWriteIndex: Optional[cute.Tensor] = None,
-        write_index_stride: Optional[Int32] = None,
+        mLast: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -834,11 +833,9 @@ class FFAFwdSm100:
             not self.disable_fwd_atomic_reduction and not self.deterministic
         ), "range locks required iff fwd atomic reduction is enabled and not deterministic"
         assert (
-            mWriteOrder is not None
-            and mWriteIndex is not None
-            and write_index_stride is not None
+            mWriteOrder is not None and mLast is not None
         ) == self.deterministic, (
-            "write order, write index and its stride are required iff deterministic"
+            "write order and per-CTA last-writer state are required iff deterministic"
         )
         if const_expr(self.deterministic):
             assert mWriteOrder is not None and cute.rank(mWriteOrder) == 3
@@ -1550,8 +1547,7 @@ class FFAFwdSm100:
             mMaskTypes,
             mRangeLocks,
             mWriteOrder,
-            mWriteIndex,
-            write_index_stride,
+            mLast,
             mCuBatches,
             mMaxLogits,
             blocksparse_tensors,
@@ -1607,8 +1603,7 @@ class FFAFwdSm100:
         mMaskTypes: Optional[cute.Tensor],
         mRangeLocks: Optional[cute.Tensor],
         mWriteOrder: Optional[cute.Tensor],
-        mWriteIndex: Optional[cute.Tensor],
-        write_index_stride: Optional[Int32],
+        mLast: Optional[cute.Tensor],
         mCuBatches: Optional[cute.Tensor],
         mMaxLogits: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
@@ -2475,8 +2470,7 @@ class FFAFwdSm100:
                 mRangeLocks=mRangeLocks,
                 mQRanges=mQRanges,
                 mWriteOrder=mWriteOrder,
-                mWriteIndex=mWriteIndex,
-                write_index_stride=write_index_stride,
+                mLast=mLast,
                 borrow_done_mbar_ptr=borrow_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
@@ -4540,8 +4534,7 @@ class FFAFwdSm100:
         mRangeLocks: Optional[cute.Tensor] = None,
         mQRanges: Optional[cute.Tensor] = None,
         mWriteOrder: Optional[cute.Tensor] = None,
-        mWriteIndex: Optional[cute.Tensor] = None,
-        write_index_stride: Optional[Int32] = None,
+        mLast: Optional[cute.Tensor] = None,
         borrow_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
@@ -4569,6 +4562,8 @@ class FFAFwdSm100:
         sm_stats_consumer_phase = Int32(0)
         o_corr_consumer_phase = Int32(0)
         corr_epi_producer_phase = Int32(1)
+        fwd_slot = cute.arch.block_idx()[0]
+        fwd_folded = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -4580,6 +4575,25 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
+            if const_expr(self.deterministic):
+                assert mQRanges is not None and mLast is not None
+                if fwd_folded < batch_idx:
+                    range_write_index.fold_fwd_last(
+                        mQRanges,
+                        mLast,
+                        fwd_slot,
+                        fwd_folded,
+                        batch_idx,
+                        self.m_block_size,
+                        self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                        tidx,
+                        cute.arch.WARP_SIZE * num_corr_warps,
+                    )
+                    cute.arch.barrier(
+                        barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+                        number_of_threads=cute.arch.WARP_SIZE * num_corr_warps,
+                    )
+                    fwd_folded = batch_idx
             if const_expr(self.range_merge):
                 n_block_min = Int32(0)
                 n_block_max = self._fwd_merge_n_iters(
@@ -5021,28 +5035,17 @@ class FFAFwdSm100:
                             )
                         if tile_has_rows:
                             if const_expr(self.deterministic):
-                                assert mQRanges is not None
                                 assert mWriteOrder is not None
-                                assert mWriteIndex is not None
-                                assert write_index_stride is not None
+                                assert mLast is not None
                                 if tidx == 0:
-                                    rows_per_token = (
-                                        self.qhead_per_kvhead
-                                        if const_expr(self.pack_gqa)
-                                        else 1
-                                    )
                                     range_write_order.wait_published(
                                         mWriteOrder,
                                         left_block,
                                         head_idx,
-                                        range_write_index.lookup_fwd_predecessor(
-                                            mWriteIndex,
-                                            mQRanges,
-                                            batch_idx,
-                                            left_block,
-                                            self.m_block_size,
-                                            rows_per_token,
-                                            write_index_stride,
+                                        cutedsl_utils.ld_acquire_cta(
+                                            cutedsl_utils.elem_pointer(
+                                                mLast, (fwd_slot, left_block)
+                                            )
                                         ),
                                     )
                                     if right_block != left_block:
@@ -5050,14 +5053,10 @@ class FFAFwdSm100:
                                             mWriteOrder,
                                             right_block,
                                             head_idx,
-                                            range_write_index.lookup_fwd_predecessor(
-                                                mWriteIndex,
-                                                mQRanges,
-                                                batch_idx,
-                                                right_block,
-                                                self.m_block_size,
-                                                rows_per_token,
-                                                write_index_stride,
+                                            cutedsl_utils.ld_acquire_cta(
+                                                cutedsl_utils.elem_pointer(
+                                                    mLast, (fwd_slot, right_block)
+                                                )
                                             ),
                                         )
                             elif tidx == 0:

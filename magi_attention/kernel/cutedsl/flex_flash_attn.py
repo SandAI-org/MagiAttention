@@ -27,7 +27,6 @@ from magi_attention.common import AttnForwardMeta
 from magi_attention.common.enum import AttnSinkLayout
 from magi_attention.utils.dtype import to_cute_dtype
 
-from . import range_write_index
 from .cache_utils import get_jit_cache
 from .cutedsl_utils import (
     get_aux_tensor_metadata,
@@ -648,8 +647,7 @@ def _flex_flash_attn_fwd(
 
     range_locks = None
     write_order = None
-    write_index = None
-    write_index_stride: int | None = None
+    write_last = None
     if not disable_fwd_atomic_reduction:
         # One int32 lock, or one [published, count] write order, per
         # (tile_m rows, head) of the layout the kernel tiles (packed rows and
@@ -662,13 +660,12 @@ def _flex_flash_attn_fwd(
             write_order = torch.zeros(
                 num_lock_blocks, lock_heads, 2, dtype=torch.int32, device=device
             )
-            num_sm = torch.cuda.get_device_properties(device).multi_processor_count
-            write_index, write_index_stride = range_write_index.build_fwd(
-                q_ranges,
-                num_lock_blocks,
-                num_sm,
-                tile_m,
-                qhead_per_kvhead if pack_gqa else 1,
+            num_cta = (
+                torch.cuda.get_device_properties(device).multi_processor_count
+                - sm_margin
+            )
+            write_last = torch.zeros(
+                num_cta, num_lock_blocks, dtype=torch.int32, device=device
             )
         else:
             range_locks = torch.zeros(
@@ -911,12 +908,9 @@ def _flex_flash_attn_fwd(
                 else None
             )
             compile_args.append(
-                to_cute_tensor(write_index, assumed_align=4)
-                if write_index is not None
+                to_cute_tensor(write_last, assumed_align=4)
+                if write_last is not None
                 else None
-            )
-            compile_args.append(
-                Int32(write_index_stride) if write_index_stride is not None else None
             )
         compile_args.extend(
             [
@@ -960,8 +954,7 @@ def _flex_flash_attn_fwd(
         call_args.append(max_logits)
         call_args.append(softcap)
         call_args.append(write_order)
-        call_args.append(write_index)
-        call_args.append(write_index_stride)
+        call_args.append(write_last)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
@@ -1640,31 +1633,7 @@ def _flex_flash_attn_bwd(
         )
     else:
         dQ_semaphore = None
-    row_group_tensor = None
-    if range_deterministic and range_merge_active:
-        assert (
-            k_merge is not None
-            and cu_batches is not None
-            and q_ranges is not None
-            and k_ranges is not None
-        )
-        if k_merge.row_group is not None:
-            row_group_tensor = k_merge.row_group
-        else:
-            group = torch.arange(k_ranges.shape[0], dtype=torch.int64, device=device)
-            row_count = cu_batches[1:].to(torch.int64) - cu_batches[:-1].to(torch.int64)
-            row_group_tensor = torch.repeat_interleave(
-                group, row_count, output_size=q_ranges.shape[0]
-            ).to(torch.int32)
-    if range_deterministic:
-        bwd_write_index_spec = range_write_index.BwdWriteIndexSpec(
-            tile_m=m_block_size,
-            cluster_tile_k=cluster_tile_k,
-            mask_type=mask_type,
-            range_merge=range_merge_active,
-        )
-    dq_write_order = dq_write_index = None
-    dq_index_stride: int | None = None
+    dq_write_order = dq_last = None
     if range_deterministic and not use_dense_dqacc_for_ranges:
         assert (
             q_ranges is not None
@@ -1675,37 +1644,18 @@ def _flex_flash_attn_bwd(
         dq_write_order = torch.zeros(
             num_q_blocks, num_head, 2, dtype=torch.int32, device=device
         )
-        dq_write_index, dq_index_stride = range_write_index.build_bwd_dq(
-            bwd_write_index_spec,
-            q_ranges,
-            k_ranges,
-            mask_types_tensor,
-            row_group_tensor,
-            num_q_blocks,
-            num_sm,
-            dq_writer_stride,
+        dq_last = torch.zeros(
+            num_sm - sm_margin, num_q_blocks, dtype=torch.int32, device=device
         )
-    dkv_write_order = dkv_write_index = dkv_group_all_k_active = None
-    dkv_index_stride: int | None = None
+    dkv_write_order = dkv_last = None
     if range_deterministic and not direct_dkv:
         assert q_ranges is not None and k_ranges is not None
         num_k_blocks = (total_k + cluster_tile_k - 1) // cluster_tile_k + 1
         dkv_write_order = torch.zeros(
             num_k_blocks, num_head_kv, 2, dtype=torch.int32, device=device
         )
-        (
-            dkv_write_index,
-            dkv_index_stride,
-            dkv_group_all_k_active,
-        ) = range_write_index.build_bwd_dkv(
-            bwd_write_index_spec,
-            q_ranges,
-            k_ranges,
-            mask_types_tensor,
-            row_group_tensor,
-            num_k_blocks,
-            num_sm,
-            dkv_writer_stride,
+        dkv_last = torch.zeros(
+            num_sm - sm_margin, num_k_blocks, dtype=torch.int32, device=device
         )
 
     # The DYNAMIC schedule's tile counter.
@@ -2050,28 +2000,17 @@ def _flex_flash_attn_bwd(
             bwd_compile_args.extend(
                 [
                     (to_cute_tensor(t, assumed_align=4) if t is not None else None)
-                    for t in (dq_write_order, dq_write_index)
+                    for t in (dq_write_order, dq_last)
                 ]
             )
             bwd_compile_args.append(
                 Int32(dq_writer_stride) if dq_writer_stride is not None else None
             )
-            bwd_compile_args.append(
-                Int32(dq_index_stride) if dq_index_stride is not None else None
-            )
             bwd_compile_args.extend(
                 [
                     (to_cute_tensor(t, assumed_align=4) if t is not None else None)
-                    for t in (dkv_write_order, dkv_write_index)
+                    for t in (dkv_write_order, dkv_last)
                 ]
-            )
-            bwd_compile_args.append(
-                Int32(dkv_index_stride) if dkv_index_stride is not None else None
-            )
-            bwd_compile_args.append(
-                to_cute_tensor(dkv_group_all_k_active, assumed_align=1, leading_dim=0)
-                if dkv_group_all_k_active is not None
-                else None
             )
         bwd_compile_args.extend(
             [
@@ -2114,13 +2053,10 @@ def _flex_flash_attn_bwd(
         bwd_call_args.append(tile_counter)
         bwd_call_args.append(softcap_value)
         bwd_call_args.append(dq_write_order)
-        bwd_call_args.append(dq_write_index)
+        bwd_call_args.append(dq_last)
         bwd_call_args.append(dq_writer_stride)
-        bwd_call_args.append(dq_index_stride)
         bwd_call_args.append(dkv_write_order)
-        bwd_call_args.append(dkv_write_index)
-        bwd_call_args.append(dkv_index_stride)
-        bwd_call_args.append(dkv_group_all_k_active)
+        bwd_call_args.append(dkv_last)
     bwd_call_args.extend(
         [
             aux_tensors,

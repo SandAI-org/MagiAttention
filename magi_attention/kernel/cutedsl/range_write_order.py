@@ -29,6 +29,7 @@ from .block_info import BlockInfo
 from .cutedsl_utils import (
     elem_pointer,
     ld_acquire,
+    ld_acquire_cta,
     mbarrier_arrive_peer_release_cluster,
     mbarrier_wait_acquire_cluster,
     st_global_release_gpu_i32,
@@ -39,20 +40,17 @@ from .seqlen_info import SeqlenInfoQK
 
 @dataclass
 class WriteOrderTensors(ParamsBase):
-    """Write order of one output and the write index of its writers.
+    """Write order of one output and per-CTA last-writer state.
 
     ``mWriteOrder[b, h] = [published, count]``. Writer ``j`` of range ``r`` is
     ``r * writer_stride + j + 1`` (0: none), so ``writer_stride`` is the count
-    of writer numbers per range. ``mWriteIndex[c, b]`` is the highest writer on
-    block ``b`` among ranges ``[0, c * index_stride)`` (0: none), so
-    ``index_stride`` is the count of ranges per index row; the kernel only
-    reads it.
+    of writer numbers per range. ``mLast[cta, b]`` holds the highest writer on
+    block ``b`` folded by CTA ``cta`` so far (0: none).
     """
 
     mWriteOrder: cute.Tensor
-    mWriteIndex: cute.Tensor
+    mLast: cute.Tensor
     writer_stride: Int32
-    index_stride: Int32
 
 
 @cute.jit
@@ -133,7 +131,6 @@ def _dkv_neighbor_active(
     mKRanges: cute.Tensor,
     mMaskTypes: Optional[cute.Tensor],
     mCuBatches: Optional[cute.Tensor],
-    mGroupAllKActive: Optional[cute.Tensor],
     seqlen_info: SeqlenInfoQK,
     attn_type: Int32,
     batch_idx: Int32,
@@ -148,7 +145,6 @@ def _dkv_neighbor_active(
             mKRanges,
             mMaskTypes,
             mCuBatches,
-            mGroupAllKActive,
             batch_idx,
             n_cta_neighbor,
             True,
@@ -171,12 +167,13 @@ def dkv_wait(
     mKRanges: cute.Tensor,
     mMaskTypes: Optional[cute.Tensor],
     mCuBatches: Optional[cute.Tensor],
-    mGroupAllKActive: Optional[cute.Tensor],
     seqlen_info: SeqlenInfoQK,
     attn_type: Int32,
     n_cta: Int32,
     head_idx: Int32,
     batch_idx: Int32,
+    dkv_folded: Int32,
+    is_fold_warp: cutlass.Boolean,
     is_waiter: cutlass.Boolean,
     block_rows: cutlass.Constexpr[int],
     covers_all_qheads: cutlass.Constexpr[bool],
@@ -198,7 +195,6 @@ def dkv_wait(
             mKRanges,
             mMaskTypes,
             mCuBatches,
-            mGroupAllKActive,
             seqlen_info,
             attn_type,
             batch_idx,
@@ -214,7 +210,6 @@ def dkv_wait(
             mKRanges,
             mMaskTypes,
             mCuBatches,
-            mGroupAllKActive,
             seqlen_info,
             attn_type,
             batch_idx,
@@ -230,47 +225,40 @@ def dkv_wait(
         head_kv = head_idx // kv_group
         group_rank = head_idx % kv_group
     writer = batch_idx * dkv_write_order.writer_stride + group_rank + 1
-    if is_waiter:
-        pred_left = writer - 1
-        pred_right = writer - 1
-        if group_rank == 0:
-            pred_left = range_write_index.lookup_dkv_predecessor(
-                dkv_write_order.mWriteIndex,
-                dkv_write_order.index_stride,
-                dkv_write_order.writer_stride,
+    slot = cute.arch.block_idx()[0]
+    if group_rank == 0 and dkv_folded < batch_idx:
+        if is_fold_warp:
+            range_write_index.fold_dkv_last(
                 block_info,
                 mQRanges,
                 mKRanges,
                 mMaskTypes,
                 mCuBatches,
-                mGroupAllKActive,
+                dkv_write_order.mLast,
+                slot,
+                dkv_folded,
                 batch_idx,
-                left,
+                dkv_write_order.writer_stride,
                 block_rows,
                 range_merge,
                 use_per_range_mask,
             )
+        dkv_folded = batch_idx
+    if is_waiter:
+        pred_left = writer - 1
+        pred_right = writer - 1
+        if group_rank == 0:
+            pred_left = ld_acquire_cta(
+                elem_pointer(dkv_write_order.mLast, (slot, left))
+            )
             if right != left:
-                pred_right = range_write_index.lookup_dkv_predecessor(
-                    dkv_write_order.mWriteIndex,
-                    dkv_write_order.index_stride,
-                    dkv_write_order.writer_stride,
-                    block_info,
-                    mQRanges,
-                    mKRanges,
-                    mMaskTypes,
-                    mCuBatches,
-                    mGroupAllKActive,
-                    batch_idx,
-                    right,
-                    block_rows,
-                    range_merge,
-                    use_per_range_mask,
+                pred_right = ld_acquire_cta(
+                    elem_pointer(dkv_write_order.mLast, (slot, right))
                 )
         wait_published(dkv_write_order.mWriteOrder, left, head_kv, pred_left)
         if right != left:
             wait_published(dkv_write_order.mWriteOrder, right, head_kv, pred_right)
-    return left, right, left_weight, right_weight, writer, head_kv
+    return left, right, left_weight, right_weight, writer, head_kv, dkv_folded
 
 
 @cute.jit
@@ -385,12 +373,10 @@ def dq_plan(
     m_block_active_start: Int32,
     m_block_active_end: Int32,
     mQRanges: cute.Tensor,
-    mKRanges: cute.Tensor,
     tile_m: cutlass.Constexpr[int],
     range_merge: cutlass.Constexpr[bool],
     use_per_range_mask: cutlass.Constexpr[bool],
     mMaskTypes: Optional[cute.Tensor] = None,
-    mCuBatches: Optional[cute.Tensor] = None,
     group_pairs: Optional[tuple[Int32, Int32, Int32]] = None,
     seqlen_k_group: Int32 = Int32(0),
     group_has_block_overlap: cutlass.Boolean = cutlass.Boolean(False),
@@ -479,25 +465,14 @@ def dq_plan(
                 prev_n_left = ov_prev_left
                 prev_n_right = ov_prev_right
 
+    slot = cute.arch.block_idx()[0]
     wait_pred_left = Int32(-1)
     if wait_left:
         if prev_n_left >= 0:
             wait_pred_left = batch_idx * dq_write_order.writer_stride + prev_n_left + 1
         else:
-            wait_pred_left = range_write_index.lookup_dq_predecessor(
-                dq_write_order.mWriteIndex,
-                dq_write_order.index_stride,
-                dq_write_order.writer_stride,
-                block_info,
-                mQRanges,
-                mKRanges,
-                mMaskTypes,
-                mCuBatches,
-                batch_idx,
-                left,
-                tile_m,
-                range_merge,
-                use_per_range_mask,
+            wait_pred_left = ld_acquire_cta(
+                elem_pointer(dq_write_order.mLast, (slot, left))
             )
 
     wait_pred_right = Int32(-1)
@@ -507,20 +482,8 @@ def dq_plan(
                 batch_idx * dq_write_order.writer_stride + prev_n_right + 1
             )
         else:
-            wait_pred_right = range_write_index.lookup_dq_predecessor(
-                dq_write_order.mWriteIndex,
-                dq_write_order.index_stride,
-                dq_write_order.writer_stride,
-                block_info,
-                mQRanges,
-                mKRanges,
-                mMaskTypes,
-                mCuBatches,
-                batch_idx,
-                right,
-                tile_m,
-                range_merge,
-                use_per_range_mask,
+            wait_pred_right = ld_acquire_cta(
+                elem_pointer(dq_write_order.mLast, (slot, right))
             )
 
     return (
