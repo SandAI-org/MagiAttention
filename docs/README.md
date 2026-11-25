@@ -35,6 +35,38 @@ That's it! You should see the documentation in your browser.
 
 ---
 
+## Preview a Documentation PR
+
+From the PR checkout, run the following command at the repository root after
+installing `docs/requirements.txt`:
+
+```bash
+docs/preview_pr.sh --pr 399 --local-only --watch
+```
+
+Replace `399` with the number of the PR for this checkout. The script starts
+with a bilingual build and rebuilds after edits to docs, assets, or package
+sources used by autodoc. Omit `--watch` for a single build. Stop watch with
+Ctrl-C. It reads saved changes from the current checkout, including uncommitted
+edits. Each successful build has its own directory and the build metadata
+records whether the checkout was dirty.
+
+Open the printed `index.html` in a browser. To serve it over HTTP, set
+`HTML_DIR` to the printed build's HTML directory and run
+`python3 -m http.server --bind 127.0.0.1 --directory "$HTML_DIR" 8080`.
+Each successful build atomically updates
+`.tmp/.tmp_tests/infra-docs-preview/pr-399/latest.json` in this checkout.
+After a rebuild, reopen the printed path or point the local server to the
+new HTML directory. Failed builds leave the previous pointer available.
+
+For shared review, give Kian the repository, PR number, machine, and absolute
+path to `latest.json`. Keep that directory available while the preview is in
+use. Shared submission from the script needs the preview service's submission
+contract. Until then, use `--local-only`. Public main docs are deployed by
+[the existing GitHub Pages workflow](../.github/workflows/sphinx.yaml).
+
+---
+
 ## Directory Structure
 
 ```

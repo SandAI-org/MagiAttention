@@ -35,6 +35,30 @@ start build/html/index.html       # Windows (Git Bash)
 
 ---
 
+## 预览文档 PR
+
+安装 `docs/requirements.txt` 中的依赖后，在 PR 对应 checkout 的仓库根目录运行：
+
+```bash
+docs/preview_pr.sh --pr 399 --local-only --watch
+```
+
+将 `399` 替换为当前 checkout 对应的 PR 编号。脚本先构建中英文文档，
+再监听文档、图片以及 autodoc 可读取的包源码。去掉 `--watch` 可只构建一次，
+按 Ctrl-C 可停止监听。已保存但未提交的修改也会用于构建，回执会标记工作树状态。
+
+打开脚本打印的 `index.html`。如需通过 HTTP 访问，将 `HTML_DIR` 设成打印出的
+HTML 目录，运行 `python3 -m http.server --bind 127.0.0.1 --directory "$HTML_DIR" 8080`。
+每次成功构建原子更新当前 checkout 的
+`.tmp/.tmp_tests/infra-docs-preview/pr-399/latest.json`。重新构建后，打开新输出路径，
+或让本地服务指向新的 HTML 目录。失败时上一份成功指针仍可用。
+
+共享评审时，把仓库、PR 编号、机器和 `latest.json` 的绝对路径交给 Kian，
+并在评审期间保留该目录。共享接收端接通前使用 `--local-only`。
+公开 main 文档沿用 [GitHub Pages 工作流](../.github/workflows/sphinx.yaml)。
+
+---
+
 ## 目录结构
 
 ```
