@@ -78,6 +78,8 @@ Recent efforts like `DCP` {cite}`wang2024datacentricheterogeneityadaptivesequenc
 
 ### Flex-Flash-Attention
 
+See the separate [blog post](./native_ffa.md) for a deep dive into the native `FFA` kernel, including its slice-level scheduling and cross-slice reduction, the Hopper (SM90) and Blackwell (SM100) implementations and their differences, and the features built on top of it.
+
 #### AttnSlice Representation
 
 `Flash-Attention` {cite}`dao2022flashattention,dao2023flashattention,shah2024flashattention3fastaccurateattention,dao2025flashattention_cute` delivers high throughput, memory efficiency, and native support for varlen-packed inputs, making it a cornerstone for large-scale training. However, its kernels assume regular mask structure and do not handle irregular, rank-distributed masks efficiently—causing fragmentation, load imbalance, excess padding, and higher communication—so a mask‑flexible kernel that preserves Flash‑Attention’s performance is required {cite}`pytorch_sdpa,dong2024flexattentionprogrammingmodel,wang2025flashmaskefficientrichmask`.
@@ -130,7 +132,7 @@ Although most mask patterns can be expressed with {math}`\mathrm{AttnSlice}` usi
 Illustrates the four supported mask types for `seqlen_q == seqlen_k`. Note: in this setting, {math}`\texttt{BI-CAUSAL}` reduces to a mask where only the principal diagonal cells are valid.
 ```
 
-```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq<sk.png
+```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq_lt_sk.png
 :name: attn_slice_mask_type_sq<sk
 :align: center
 :width: 650px
@@ -139,7 +141,7 @@ Illustrates the four supported mask types for `seqlen_q == seqlen_k`. Note: in t
 Illustration of the four supported mask types when `seqlen_q < seqlen_k`. This configuration commonly occurs when employing {math}`\texttt{INV-CAUSAL}` and {math}`\texttt{BI-CAUSAL}` masks.
 ```
 
-```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq>sk.png
+```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq_gt_sk.png
 :name: attn_slice_mask_type_sq>sk
 :align: center
 :width: 650px
