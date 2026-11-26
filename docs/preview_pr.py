@@ -114,6 +114,70 @@ def _check_entries(html: Path) -> None:
                     raise RuntimeError(f"{page}: missing preview resource {link}")
 
 
+def _build_html(html: Path, doctrees: Path) -> None:
+    for lang, destination in (("en", html), ("zh_CN", html / "zh_CN")):
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "sphinx",
+                "-b",
+                "html",
+                "-d",
+                str(doctrees / lang),
+                "source",
+                str(destination),
+            ],
+            cwd=_ROOT / "docs",
+            env={**os.environ, "DOCS_LANGUAGE": lang},
+            check=True,
+        )
+
+    _check_entries(html)
+
+
+def _manifest(scope: str, sha: str, dirty: bool, html: str) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "repository": _REPOSITORY,
+        "scope": scope,
+        "source_sha": sha,
+        "dirty": dirty,
+        "html": html,
+        "entries": [
+            {"label": "Open docs", "path": "index.html"},
+            {"label": "Chinese docs", "path": "zh_CN/index.html"},
+        ],
+    }
+
+
+def _build_artifact(destination: Path, scope: str, expected_sha: str) -> None:
+    state = _checkout_state()
+    sha, status, _ = state
+    if sha != expected_sha or status:
+        raise RuntimeError(
+            "CI artifacts require a clean checkout at the expected source SHA."
+        )
+    if destination.exists():
+        raise RuntimeError(f"Artifact destination already exists: {destination}")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=destination.parent) as staging:
+        stage = Path(staging)
+        artifact = stage / "artifact"
+        _build_html(artifact / "html", stage / "doctrees")
+        if _checkout_state() != state:
+            raise RuntimeError("Checkout changed during the artifact build.")
+
+        manifest = _manifest(scope, sha, False, "html")
+        (artifact / "manifest.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        artifact.rename(destination)
+
+    print(f"Built CI artifact at {destination} (source SHA {sha})", flush=True)
+
+
 def _build(scope_dir: Path, scope: str) -> None:
     with (scope_dir / ".build.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -125,42 +189,15 @@ def _build(scope_dir: Path, scope: str) -> None:
         # A registered publisher may read the HTML as a different local user.
         build.chmod(0o755)
         html = build / "html"
-        for lang, destination in (("en", html), ("zh_CN", html / "zh_CN")):
-            subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "sphinx",
-                    "-b",
-                    "html",
-                    "-d",
-                    str(build / f"doctrees-{lang}"),
-                    "source",
-                    str(destination),
-                ],
-                cwd=_ROOT / "docs",
-                env={**os.environ, "DOCS_LANGUAGE": lang},
-                check=True,
-            )
-
-        _check_entries(html)
+        _build_html(html, build / "doctrees")
         if _checkout_state() != state:
             raise RuntimeError(
                 "Checkout changed during the build. Wait for the next build."
             )
 
-        manifest = {
-            "schema_version": 1,
-            "repository": _REPOSITORY,
-            "scope": scope,
-            "source_sha": sha,
-            "dirty": bool(status),
-            "html": html.relative_to(scope_dir).as_posix(),
-            "entries": [
-                {"label": "Open docs", "path": "index.html"},
-                {"label": "Chinese docs", "path": "zh_CN/index.html"},
-            ],
-        }
+        manifest = _manifest(
+            scope, sha, bool(status), html.relative_to(scope_dir).as_posix()
+        )
         temp = scope_dir / f".{build.name}.json.tmp"
         temp.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         temp.replace(scope_dir / "latest.json")
@@ -209,19 +246,35 @@ def _main() -> int:
     parser.add_argument(
         "--watch", action="store_true", help="Rebuild after local edits"
     )
-    parser.add_argument(
-        "--local-only", action="store_true", help="Build without submitting"
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
+        "--local-only", action="store_true", help="Build a personal preview"
     )
+    mode.add_argument(
+        "--artifact-dir", type=Path, help="Write a clean repository CI artifact"
+    )
+    parser.add_argument("--source-sha", help="Expected full HEAD for --artifact-dir")
     args = parser.parse_args()
 
     if not re.fullmatch(r"[1-9][0-9]*", args.pr):
         parser.error("--pr must be a positive PR number without leading zeros")
-    if not args.local_only:
-        parser.error(
-            "Shared submission is not enabled. Use --local-only for the Kian handoff."
-        )
-    _check_repository()
     scope = f"pr-{args.pr}"
+    if args.artifact_dir is not None:
+        if (
+            args.watch
+            or not args.source_sha
+            or not re.fullmatch(r"[0-9a-f]{40}", args.source_sha)
+        ):
+            parser.error(
+                "--artifact-dir requires a full --source-sha and cannot use --watch"
+            )
+        _check_repository()
+        _build_artifact(args.artifact_dir.resolve(), scope, args.source_sha)
+        return 0
+
+    if args.source_sha:
+        parser.error("--source-sha requires --artifact-dir")
+    _check_repository()
     scope_dir = _ROOT / ".tmp" / ".tmp_tests" / "infra-docs-preview" / scope
     scope_dir.mkdir(parents=True, exist_ok=True)
     if args.watch:

@@ -59,11 +59,15 @@ Each successful build atomically updates
 After a rebuild, reopen the printed path or point the local server to the
 new HTML directory. Failed builds leave the previous pointer available.
 
-For shared review, give Kian the repository, PR number, machine, and absolute
-path to `latest.json`. Keep that directory available while the preview is in
-use. Shared submission from the script needs the preview service's submission
-contract. Until then, use `--local-only`. Public main docs are deployed by
-[the existing GitHub Pages workflow](../.github/workflows/sphinx.yaml).
+For a personal review link, give Kian the repository, PR number, machine, and
+absolute path to `latest.json`. Keep that directory available while the preview
+is in use.
+
+For a repository review link, the [Docs PR preview workflow](../.github/workflows/docs-pr-preview.yaml)
+builds the exact head of same-repository PRs that change docs or assets.
+The `infra-docs-pr-<number>` artifact contains `manifest.json` and the bilingual
+`html/` tree. Share the successful run and artifact ID with Kian for publication.
+Public main docs are deployed by [the existing GitHub Pages workflow](../.github/workflows/sphinx.yaml).
 
 ---
 

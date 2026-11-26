@@ -53,8 +53,12 @@ HTML 目录，运行 `python3 -m http.server --bind 127.0.0.1 --directory "$HTML
 `.tmp/.tmp_tests/infra-docs-preview/pr-399/latest.json`。重新构建后，打开新输出路径，
 或让本地服务指向新的 HTML 目录。失败时上一份成功指针仍可用。
 
-共享评审时，把仓库、PR 编号、机器和 `latest.json` 的绝对路径交给 Kian，
-并在评审期间保留该目录。共享接收端接通前使用 `--local-only`。
+个人评审时，把仓库、PR 编号、机器和 `latest.json` 的绝对路径交给 Kian，
+并在评审期间保留该目录。
+
+同仓库的 PR 修改文档或资源时，[Docs PR preview 工作流](../.github/workflows/docs-pr-preview.yaml)
+会用 PR 的实际 head 构建双语站点。`infra-docs-pr-<编号>` 产物包含
+`manifest.json` 和完整的 `html/`，将成功的 run 和 artifact ID 交给 Kian 发布。
 公开 main 文档沿用 [GitHub Pages 工作流](../.github/workflows/sphinx.yaml)。
 
 ---

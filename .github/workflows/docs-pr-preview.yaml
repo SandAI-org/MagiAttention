@@ -1,0 +1,47 @@
+name: Docs PR preview
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'docs/**'
+      - 'assets/**'
+      - '.github/workflows/docs-pr-preview.yaml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-pr-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      group: default
+    container:
+      image: nvcr.io/nvidia/pytorch:26.05-py3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Install docs dependencies
+        run: python3 -m pip install -r docs/requirements.txt
+
+      - name: Build docs artifact
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          docs/preview_pr.sh --pr "$PR_NUMBER" --source-sha "$PR_HEAD_SHA" \
+            --artifact-dir "$RUNNER_TEMP/infra-docs-pr-$PR_NUMBER"
+
+      - name: Upload docs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-docs-pr-${{ github.event.pull_request.number }}
+          path: ${{ runner.temp }}/infra-docs-pr-${{ github.event.pull_request.number }}
+          if-no-files-found: error
