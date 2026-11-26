@@ -132,7 +132,7 @@ Although most mask patterns can be expressed with {math}`\mathrm{AttnSlice}` usi
 Illustrates the four supported mask types for `seqlen_q == seqlen_k`. Note: in this setting, {math}`\texttt{BI-CAUSAL}` reduces to a mask where only the principal diagonal cells are valid.
 ```
 
-```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq<sk.png
+```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq_lt_sk.png
 :name: attn_slice_mask_type_sq<sk
 :align: center
 :width: 650px
@@ -141,7 +141,7 @@ Illustrates the four supported mask types for `seqlen_q == seqlen_k`. Note: in t
 Illustration of the four supported mask types when `seqlen_q < seqlen_k`. This configuration commonly occurs when employing {math}`\texttt{INV-CAUSAL}` and {math}`\texttt{BI-CAUSAL}` masks.
 ```
 
-```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq>sk.png
+```{figure} ../../../assets/magi_attn/ffa/attn_slice_mask_type_sq_gt_sk.png
 :name: attn_slice_mask_type_sq>sk
 :align: center
 :width: 650px

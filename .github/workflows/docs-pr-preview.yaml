@@ -29,7 +29,10 @@ jobs:
           persist-credentials: false
 
       - name: Install docs dependencies
-        run: python3 -m pip install -r docs/requirements.txt
+        run: |
+          # Autodoc imports MagiAttention, including its CuTeDSL backend.
+          python3 -m pip install --constraint .github/configs/ci_constraints.txt \
+            -r docs/requirements.txt 'nvidia-cutlass-dsl[cu13]' quack-kernels
 
       - name: Build docs artifact
         env:

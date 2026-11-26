@@ -166,6 +166,11 @@ def _build_artifact(destination: Path, scope: str, expected_sha: str) -> None:
         stage = Path(staging)
         artifact = stage / "artifact"
         _build_html(artifact / "html", stage / "doctrees")
+        for file in artifact.rglob("*"):
+            if any(char in file.name for char in '"<>:|*?\\\r\n'):
+                raise RuntimeError(
+                    f"Invalid Actions artifact path: {file.relative_to(artifact)}"
+                )
         if _checkout_state() != state:
             raise RuntimeError("Checkout changed during the artifact build.")
 
