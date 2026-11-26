@@ -36,6 +36,9 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          # The container user can differ from the owner of the runner checkout.
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory
+          export GIT_CONFIG_VALUE_0="$GITHUB_WORKSPACE"
           docs/preview_pr.sh --pr "$PR_NUMBER" --source-sha "$PR_HEAD_SHA" \
             --artifact-dir "$RUNNER_TEMP/infra-docs-pr-$PR_NUMBER"
 
