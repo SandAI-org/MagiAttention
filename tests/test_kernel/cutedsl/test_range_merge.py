@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import unittest
+from collections.abc import Sequence
 from unittest import TestCase
 
 import torch
@@ -45,6 +46,7 @@ from magi_attention.testing.cutedsl_utils import (
     CuteDSLDistTestBase,
     HeadConfig,
     assert_close_to_torch_ref,
+    assert_cuda_graph_matches_eager,
     is_sm100_family,
     make_qkv,
     mask_types_arg,
@@ -53,6 +55,7 @@ from magi_attention.testing.cutedsl_utils import (
     to_ranges_tensor,
 )
 from magi_attention.testing.dist_common import with_run_in_mp
+from magi_attention.testing.precision import assert_equal
 from magi_attention.utils import make_attn_mask_from_ffa_args
 
 # Unique-writer dK/dV, which the backward merge requires, is MHA-only.
@@ -243,6 +246,9 @@ class TestRangeMergePlan(TestCase):
             merged[:count], sorted_inner, sorted_mask, cu[: count + 1]
         )
         got = self._merge(outer, inner, mask_types)
+        self.assertEqual(
+            [g[0] for g in got], [[512, 513], [513, 640], [0, 256], [256, 512]]
+        )
         self.assertEqual(
             sorted(got, key=lambda g: g[0]), sorted(by_outer, key=lambda g: g[0])
         )
@@ -477,14 +483,6 @@ class TestCuteDSLRangeMergeSyncAndGraph(TestCase):
         torch.testing.assert_close(dk.float(), k_ref.grad, atol=3e-2, rtol=3e-2)
         torch.testing.assert_close(dv.float(), v_ref.grad, atol=3e-2, rtol=3e-2)
 
-        static_q = q.detach().clone()
-        static_k = k.detach().clone()
-        static_v = v.detach().clone()
-        static_do = do.detach().clone()
-        static_qr = qr.clone()
-        static_kr = kr.clone()
-        static_am = am.clone()
-
         def run_fwd_bwd(q_in, k_in, v_in, do_in, qr_in, kr_in, am_in):
             out_g, lse_g = _flex_flash_attn_fwd(
                 q_in,
@@ -525,67 +523,55 @@ class TestCuteDSLRangeMergeSyncAndGraph(TestCase):
             )
             return out_g, lse_g, dq_g, dk_g, dv_g
 
-        side = torch.cuda.Stream()
-        side.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(side):
-            run_fwd_bwd(
-                static_q,
-                static_k,
-                static_v,
-                static_do,
-                static_qr,
-                static_kr,
-                static_am,
+        schedules = (
+            (q_ranges_1, k_ranges_1, mask_types_1),
+            (q_ranges_2, k_ranges_2, mask_types_2),
+        )
+        replay_inputs = [
+            (
+                torch.randn_like(q),
+                torch.randn_like(k),
+                torch.randn_like(v),
+                torch.randn_like(do),
+                torch.tensor(q_list, dtype=torch.int32, device="cuda"),
+                torch.tensor(k_list, dtype=torch.int32, device="cuda"),
+                torch.tensor(m_list, dtype=torch.int32, device="cuda"),
             )
-        torch.cuda.current_stream().wait_stream(side)
+            for q_list, k_list, m_list in schedules
+        ]
 
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            g_outputs = run_fwd_bwd(
-                static_q,
-                static_k,
-                static_v,
-                static_do,
-                static_qr,
-                static_kr,
-                static_am,
-            )
+        def check_replay(
+            _step: int, got: Sequence[torch.Tensor], eager: Sequence[torch.Tensor]
+        ) -> None:
+            for idx in (0, 1):
+                assert_equal(
+                    got[idx], eager[idx], print_rank=-1, print_no_mismatch=False
+                )
+            for idx in (2, 3, 4):
+                if grad_tol == 0.0:
+                    assert_equal(
+                        got[idx], eager[idx], print_rank=-1, print_no_mismatch=False
+                    )
+                else:
+                    torch.testing.assert_close(
+                        got[idx].float(),
+                        eager[idx].float(),
+                        atol=grad_tol,
+                        rtol=grad_tol,
+                    )
 
-        def replay_and_check(q_list, k_list, m_list) -> None:
-            new_q = torch.randn_like(static_q)
-            new_k = torch.randn_like(static_k)
-            new_v = torch.randn_like(static_v)
-            new_do = torch.randn_like(static_do)
-            new_qr = torch.tensor(q_list, dtype=torch.int32, device="cuda")
-            new_kr = torch.tensor(k_list, dtype=torch.int32, device="cuda")
-            new_am = torch.tensor(m_list, dtype=torch.int32, device="cuda")
-
-            static_q.copy_(new_q)
-            static_k.copy_(new_k)
-            static_v.copy_(new_v)
-            static_do.copy_(new_do)
-            static_qr.copy_(new_qr)
-            static_kr.copy_(new_kr)
-            static_am.copy_(new_am)
-
-            graph.replay()
-            torch.cuda.synchronize()
-            got_out, got_lse, got_dq, got_dk, got_dv = (t.clone() for t in g_outputs)
-
-            eager_out, eager_lse, eager_dq, eager_dk, eager_dv = run_fwd_bwd(
-                new_q, new_k, new_v, new_do, new_qr, new_kr, new_am
-            )
-            torch.cuda.synchronize()
-
-            self.assertTrue(torch.equal(got_out, eager_out))
-            self.assertTrue(torch.equal(got_lse, eager_lse))
-            torch.testing.assert_close(
-                (got_dq.float(), got_dk.float(), got_dv.float()),
-                (eager_dq.float(), eager_dk.float(), eager_dv.float()),
-                atol=grad_tol,
-                rtol=grad_tol,
-            )
-
+        replayed = assert_cuda_graph_matches_eager(
+            run_fwd_bwd,
+            (q.detach(), k.detach(), v.detach(), do.detach(), qr, kr, am),
+            replay_inputs,
+            check=check_replay,
+        )
+        for (
+            (q_list, k_list, m_list),
+            inputs,
+            (got_out, _, got_dq, got_dk, got_dv),
+        ) in zip(schedules, replay_inputs, replayed, strict=True):
+            new_q, new_k, new_v, new_do = inputs[:4]
             q_r = new_q.detach().float().requires_grad_(True)
             k_r = new_k.detach().float().requires_grad_(True)
             v_r = new_v.detach().float().requires_grad_(True)
@@ -604,9 +590,6 @@ class TestCuteDSLRangeMergeSyncAndGraph(TestCase):
             torch.testing.assert_close(got_dq.float(), q_r.grad, atol=3e-2, rtol=3e-2)
             torch.testing.assert_close(got_dk.float(), k_r.grad, atol=3e-2, rtol=3e-2)
             torch.testing.assert_close(got_dv.float(), v_r.grad, atol=3e-2, rtol=3e-2)
-
-        replay_and_check(q_ranges_1, k_ranges_1, mask_types_1)
-        replay_and_check(q_ranges_2, k_ranges_2, mask_types_2)
 
     @parameterize("deterministic", [False, True])
     def test_all_empty_degenerate_ranges_sync_free_and_cuda_graph(
@@ -677,27 +660,18 @@ class TestCuteDSLRangeMergeSyncAndGraph(TestCase):
             torch.cuda.set_sync_debug_mode(prev_sync_debug_mode)
         torch.cuda.synchronize()
 
-        self.assertEqual(float(out.abs().max().item()), 0.0)
-        self.assertTrue(bool(torch.isneginf(lse).all()))
-        self.assertEqual(float(dq.abs().max().item()), 0.0)
-        self.assertEqual(float(dk.abs().max().item()), 0.0)
-        self.assertEqual(float(dv.abs().max().item()), 0.0)
+        def assert_zero_neginf(t_out, t_lse, t_dq, t_dk, t_dv) -> None:
+            self.assertEqual(float(t_out.abs().max().item()), 0.0)
+            self.assertTrue(bool(torch.isneginf(t_lse).all()))
+            self.assertEqual(float(t_dq.abs().max().item()), 0.0)
+            self.assertEqual(float(t_dk.abs().max().item()), 0.0)
+            self.assertEqual(float(t_dv.abs().max().item()), 0.0)
 
-        side = torch.cuda.Stream()
-        side.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(side):
-            run_step(q, k, v, do)
-        torch.cuda.current_stream().wait_stream(side)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            g_out, g_lse, g_dq, g_dk, g_dv = run_step(q, k, v, do)
-        graph.replay()
-        torch.cuda.synchronize()
-        self.assertEqual(float(g_out.abs().max().item()), 0.0)
-        self.assertTrue(bool(torch.isneginf(g_lse).all()))
-        self.assertEqual(float(g_dq.abs().max().item()), 0.0)
-        self.assertEqual(float(g_dk.abs().max().item()), 0.0)
-        self.assertEqual(float(g_dv.abs().max().item()), 0.0)
+        assert_zero_neginf(out, lse, dq, dk, dv)
+        (g_out, g_lse, g_dq, g_dk, g_dv) = assert_cuda_graph_matches_eager(
+            run_step, (q, k, v, do), [(q, k, v, do)]
+        )[0]
+        assert_zero_neginf(g_out, g_lse, g_dq, g_dk, g_dv)
 
 
 if __name__ == "__main__":

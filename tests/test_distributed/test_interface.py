@@ -30,7 +30,6 @@ from magi_attention.api.magi_attn_interface import (
     dispatch,
     dist_attn_runtime_dict_mgr,
     get_position_ids,
-    magi_attn_flex_dispatch,
     magi_attn_flex_key,
     magi_attn_varlen_key,
     make_flex_key_for_new_mask_after_dispatch,
@@ -797,8 +796,7 @@ class TestInterfaceWithWorldSize4(TestInterfaceBaseWithWorldSize1):
                 "MAGI_ATTENTION_DETERMINISTIC_MODE": True,
             }
         ):
-            local_q, key = magi_attn_flex_dispatch(
-                total_q,
+            key = magi_attn_flex_key(
                 q_ranges=AttnRanges.from_ranges([[0, 512], [512, 1024], [512, 1024]]),
                 k_ranges=AttnRanges.from_ranges([[0, 512], [0, 512], [512, 1024]]),
                 attn_mask_type=[
@@ -817,7 +815,9 @@ class TestInterfaceWithWorldSize4(TestInterfaceBaseWithWorldSize1):
                     dispatch_config=DispatchConfig(chunk_size=128)
                 ),
             )
-            local_k, local_v = (dispatch(t, key=key) for t in (total_k, total_v))
+            local_q, local_k, local_v = (
+                dispatch(t, key=key) for t in (total_q, total_k, total_v)
+            )
 
             def run():
                 leaves = [

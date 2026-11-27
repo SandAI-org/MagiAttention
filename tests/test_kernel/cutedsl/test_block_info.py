@@ -39,6 +39,7 @@ class _BlockInfoDualLauncher:
         window_right: int | None,
         pack_factor: int,
         per_range: bool,
+        compare_legacy_m: bool = False,
     ):
         self.tile_m = tile_m
         self.tile_n = tile_n
@@ -48,6 +49,7 @@ class _BlockInfoDualLauncher:
         self.window_right = window_right
         self.pack_factor = pack_factor
         self.per_range = per_range
+        self.compare_legacy_m = compare_legacy_m
 
     @cute.jit
     def __call__(
@@ -98,86 +100,33 @@ class _BlockInfoDualLauncher:
             sq = Int32(mSeqQ[i])
             sk = Int32(mSeqK[i])
             idx = Int32(mIdx[i])
-            if cutlass.const_expr(self.per_range):
+            if cutlass.const_expr(self.compare_legacy_m):
                 at = Int32(mAttn[i])
-                flo, fhi = info.get_m_block_min_max_per_range_seqlens(sq, sk, idx, at)
-                dlo, dhi = info.get_n_block_min_max_per_range_seqlens(sq, sk, idx, at)
+                seqlen_info = SeqlenInfoQK.create(
+                    batch_idx=Int32(0),
+                    seqlen_q_static=sq,
+                    seqlen_k_static=sk,
+                    tile_m=self.tile_m,
+                    tile_n=self.tile_n,
+                )
+                flo, fhi = info.get_m_block_min_max_per_range(seqlen_info, idx, at)
+                dlo, dhi = info.get_m_block_min_max_per_range_seqlens(sq, sk, idx, at)
             else:
-                flo, fhi = info.get_m_block_min_max_seqlens(sq, sk, idx)
-                dlo, dhi = info.get_n_block_min_max_seqlens(sq, sk, idx)
+                if cutlass.const_expr(self.per_range):
+                    at = Int32(mAttn[i])
+                    flo, fhi = info.get_m_block_min_max_per_range_seqlens(
+                        sq, sk, idx, at
+                    )
+                    dlo, dhi = info.get_n_block_min_max_per_range_seqlens(
+                        sq, sk, idx, at
+                    )
+                else:
+                    flo, fhi = info.get_m_block_min_max_seqlens(sq, sk, idx)
+                    dlo, dhi = info.get_n_block_min_max_seqlens(sq, sk, idx)
             mFwdLo[i] = flo
             mFwdHi[i] = fhi
             mDualLo[i] = dlo
             mDualHi[i] = dhi
-
-
-class _BlockInfoLegacyMPerRangeLauncher:
-    def __init__(self, tile_m: int, tile_n: int, pack_factor: int = 1):
-        self.tile_m = tile_m
-        self.tile_n = tile_n
-        self.pack_factor = pack_factor
-
-    @cute.jit
-    def __call__(
-        self,
-        mSeqQ: cute.Tensor,
-        mSeqK: cute.Tensor,
-        mIdx: cute.Tensor,
-        mAttn: cute.Tensor,
-        mRawLo: cute.Tensor,
-        mRawHi: cute.Tensor,
-        mNormLo: cute.Tensor,
-        mNormHi: cute.Tensor,
-        count: Int32,
-        stream: cuda.CUstream,
-    ):
-        grid_x = (count + 127) // 128
-        self.kernel(
-            mSeqQ, mSeqK, mIdx, mAttn, mRawLo, mRawHi, mNormLo, mNormHi, count
-        ).launch(grid=(grid_x, 1, 1), block=(128, 1, 1), stream=stream)
-
-    @cute.kernel
-    def kernel(
-        self,
-        mSeqQ: cute.Tensor,
-        mSeqK: cute.Tensor,
-        mIdx: cute.Tensor,
-        mAttn: cute.Tensor,
-        mRawLo: cute.Tensor,
-        mRawHi: cute.Tensor,
-        mNormLo: cute.Tensor,
-        mNormHi: cute.Tensor,
-        count: Int32,
-    ):
-        info = BlockInfo(
-            self.tile_m,
-            self.tile_n,
-            True,
-            False,
-            False,
-            None,
-            None,
-            qhead_per_kvhead_packgqa=self.pack_factor,
-        )
-        i = cute.arch.block_idx()[0] * 128 + cute.arch.thread_idx()[0]
-        if i < count:
-            sq = Int32(mSeqQ[i])
-            sk = Int32(mSeqK[i])
-            idx = Int32(mIdx[i])
-            at = Int32(mAttn[i])
-            seqlen_info = SeqlenInfoQK.create(
-                batch_idx=Int32(0),
-                seqlen_q_static=sq,
-                seqlen_k_static=sk,
-                tile_m=self.tile_m,
-                tile_n=self.tile_n,
-            )
-            rlo, rhi = info.get_m_block_min_max_per_range(seqlen_info, idx, at)
-            nlo, nhi = info.get_m_block_min_max_per_range_seqlens(sq, sk, idx, at)
-            mRawLo[i] = rlo
-            mRawHi[i] = rhi
-            mNormLo[i] = nlo
-            mNormHi[i] = nhi
 
 
 class _BlockInfoSplitKVLauncher:
@@ -431,7 +380,9 @@ class TestBlockInfoDualBounds(TestCase):
     def test_empty_and_inverted_bounds_on_device(self):
         # Counterexample: seqlen_q=512, seqlen_k=128, tile=128, bi_causal, n_block=0.
         # Legacy get_m_block_min_max_per_range returns (3, 1); *_seqlens normalizes to (1, 1).
-        legacy_launcher = _BlockInfoLegacyMPerRangeLauncher(tile_m=128, tile_n=128)
+        legacy_launcher = _BlockInfoDualLauncher(
+            128, 128, True, False, None, None, 1, per_range=True, compare_legacy_m=True
+        )
         cases = [
             (512, 128, 0, MT_MAP.bi_causal),
             (512, 128, 1, MT_MAP.full),  # oob n_block on non-empty seqs

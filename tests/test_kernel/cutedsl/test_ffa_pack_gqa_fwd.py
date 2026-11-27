@@ -25,7 +25,11 @@ from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
 from magi_attention.kernel.cutedsl.flex_flash_attn import _flex_flash_attn_fwd
 from magi_attention.meta.collection.calc_meta import AttnArg
 from magi_attention.testing import parameterize, ref_attn_func
-from magi_attention.testing.cutedsl_utils import record_fwd_kernels
+from magi_attention.testing.cutedsl_utils import (
+    Relations,
+    overlapping_relations,
+    record_fwd_kernels,
+)
 from magi_attention.utils import make_attn_mask_from_ffa_args
 
 _TILE_M = 128
@@ -33,8 +37,6 @@ _HEAD_DIM = 128
 _NUM_HEAD_KV = 2
 # fp32 O of bf16 inputs against the fp32 reference of the same bf16 inputs.
 _TOL = 1e-2
-
-Relations = list[tuple[list[int], list[int], int]]
 
 
 def _relation_mask(len_q: int, len_k: int, mask_type: int, device) -> torch.Tensor:
@@ -100,30 +102,6 @@ def _qkv(
         for _ in range(2)
     )
     return q, k, v
-
-
-def _overlapping_relations(
-    len_qs: list[int], coverage: int, mask_types: list[int]
-) -> tuple[Relations, int, int]:
-    """Per q length, ``coverage`` relations over shifted, unaligned q ranges,
-    each against its own K range; returns (relations, total_q, total_k)."""
-    relations: Relations = []
-    q_cursor, k_cursor, i = 0, 0, 0
-    for len_q in len_qs:
-        q_start = q_cursor + 3
-        for c in range(coverage):
-            len_k = len_q + 37
-            relations.append(
-                (
-                    [q_start + c, q_start + c + len_q],
-                    [k_cursor, k_cursor + len_k],
-                    mask_types[i % len(mask_types)],
-                )
-            )
-            k_cursor += len_k
-            i += 1
-        q_cursor = q_start + coverage + len_q
-    return relations, q_cursor + 5, k_cursor
 
 
 def _range_args(relations: Relations, device="cuda") -> dict:
@@ -255,7 +233,7 @@ class TestFFAPackGqaFwd(TestCase):
             # Second stage, second work tile and a long unaligned range.
             ([t + 1, 2 * t + 1, 1000], 2 if two_stages else 1),
         ):
-            relations, total_q, total_k = _overlapping_relations(
+            relations, total_q, total_k = overlapping_relations(
                 len_qs, coverage=3, mask_types=mask_types
             )
             q, k, v = _qkv(total_q, total_k, group)
@@ -282,7 +260,7 @@ class TestFFAPackGqaFwd(TestCase):
             self._log_ran(f"stage boundaries G={group} len_qs={len_qs}")
 
     def test_packed_bf16_out_matches_reference(self):
-        relations, total_q, total_k = _overlapping_relations(
+        relations, total_q, total_k = overlapping_relations(
             [9, 33, 300], coverage=2, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
         q, k, v = _qkv(total_q, total_k, group=4)
@@ -299,7 +277,7 @@ class TestFFAPackGqaFwd(TestCase):
     def test_packed_other_dtype_and_head_dim(self, case):
         """(input dtype, head_dim) besides the bf16 / d128 used elsewhere."""
         dtype, head_dim = case
-        relations, total_q, total_k = _overlapping_relations(
+        relations, total_q, total_k = overlapping_relations(
             [7, 40, 260], coverage=2, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
         q, k, v = _qkv(total_q, total_k, 4, dtype=dtype, head_dim=head_dim)
@@ -422,7 +400,7 @@ class TestFFAPackGqaFwd(TestCase):
 
     def test_packed_max_logits_reduce_by_physical_q_head(self):
         group = 8
-        relations, total_q, total_k = _overlapping_relations(
+        relations, total_q, total_k = overlapping_relations(
             [5, 40, 260], coverage=2, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
         q, k, v = _qkv(total_q, total_k, group, q_head_scale=True)
@@ -437,7 +415,7 @@ class TestFFAPackGqaFwd(TestCase):
         """A captured packed fwd replays on new data: the lock array and the
         DYNAMIC tile counter are re-zeroed inside the graph."""
         group = 4
-        relations, total_q, total_k = _overlapping_relations(
+        relations, total_q, total_k = overlapping_relations(
             [17, 70], coverage=2, mask_types=[MT_MAP.full]
         )
         q, k, v = _qkv(total_q, total_k, group)
@@ -468,7 +446,7 @@ class TestFFAPackGqaFwd(TestCase):
         """The bwd reads the physical LSE the packed fwd wrote: gradients
         match those of the unpacked fwd."""
         group = 4
-        relations, total_q, total_k = _overlapping_relations(
+        relations, total_q, total_k = overlapping_relations(
             [33, 150], coverage=2, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
         q, k, v = _qkv(total_q, total_k, group)
@@ -494,7 +472,7 @@ class TestFFAPackGqaFwd(TestCase):
     # ─────────────────────────────────────────────────────────────────────
 
     def test_atomic_fwd_defaults_to_unpacked(self):
-        relations, total_q, total_k = _overlapping_relations(
+        relations, total_q, total_k = overlapping_relations(
             [20], coverage=2, mask_types=[MT_MAP.full]
         )
         q, k, v = _qkv(total_q, total_k, group=4)
@@ -503,8 +481,11 @@ class TestFFAPackGqaFwd(TestCase):
 
     @parameterize("group", [4, 3, 6])
     def test_direct_store_default_packs_only_when_group_divides_tile_m(self, group):
+        """``pack_gqa=None`` packs the direct-store fwd (ranges and dense)
+        only when the q tile is a multiple of the group; ``True`` still packs
+        a non-dividing group. Both give the reference output."""
         expected = _TILE_M % group == 0
-        relations, total_q, total_k = _overlapping_relations(
+        relations, total_q, total_k = overlapping_relations(
             [20, 150], coverage=1, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
         q, k, v = _qkv(total_q, total_k, group)
@@ -512,8 +493,7 @@ class TestFFAPackGqaFwd(TestCase):
         covered = torch.cat(
             [torch.arange(s, e, device=q.device) for (s, e), _, _ in relations]
         )
-
-        def ranges_fwd(pack: bool | None):
+        for pack, pack_expected in ((None, expected), (True, True)):
             with record_fwd_kernels() as built:
                 out, lse = _flex_flash_attn_fwd(
                     q,
@@ -525,16 +505,13 @@ class TestFFAPackGqaFwd(TestCase):
                     out_dtype=torch.float32,
                 )
             (kernel,) = built
-            return kernel, out, lse
-
-        kernel, out, lse = ranges_fwd(None)
-        self.assertEqual(kernel.pack_gqa, expected, (group, None))
-        torch.testing.assert_close(out[covered], out_ref[covered], atol=_TOL, rtol=_TOL)
-        torch.testing.assert_close(lse[covered], lse_ref[covered], atol=1e-3, rtol=1e-3)
-        kernel, out, lse = ranges_fwd(True)
-        self.assertEqual(kernel.pack_gqa, True, (group, True))
-        torch.testing.assert_close(out[covered], out_ref[covered], atol=_TOL, rtol=_TOL)
-        torch.testing.assert_close(lse[covered], lse_ref[covered], atol=1e-3, rtol=1e-3)
+            self.assertEqual(kernel.pack_gqa, pack_expected, (group, pack))
+            torch.testing.assert_close(
+                out[covered], out_ref[covered], atol=_TOL, rtol=_TOL
+            )
+            torch.testing.assert_close(
+                lse[covered], lse_ref[covered], atol=1e-3, rtol=1e-3
+            )
 
         dense = ([0, total_q], [0, total_k], MT_MAP.full)
         out_ref, _, _ = _ref_fwd(q, k, v, [dense])
@@ -548,7 +525,7 @@ class TestFFAPackGqaFwd(TestCase):
         self._log_ran(f"direct-store default G={group} packed={expected}")
 
     def test_packed_atomic_fwd_rejects_group_not_dividing_tile_m(self):
-        relations, total_q, total_k = _overlapping_relations(
+        relations, total_q, total_k = overlapping_relations(
             [20], coverage=2, mask_types=[MT_MAP.full]
         )
         q, k, v = _qkv(total_q, total_k, group=3)
@@ -566,7 +543,7 @@ class TestFFAPackGqaFwd(TestCase):
         """The dist wrapper's explicit ``pack_gqa=True`` reaches the kernel
         and matches its default unpacked atomic forward."""
         group = 4
-        relations, total_q, total_k = _overlapping_relations(
+        relations, total_q, total_k = overlapping_relations(
             [12, 140], coverage=2, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
         q, k, v = _qkv(total_q, total_k, group)

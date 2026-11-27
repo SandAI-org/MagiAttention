@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import math
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from unittest import mock
@@ -38,6 +38,7 @@ from magi_attention.testing.precision import (
     NORM_RTOL_RATIO,
     ROUNDING_NOISE_PERTURBATION,
     assert_close,
+    assert_equal,
     calc_inf_norm,
     calc_rounding_noise_norm,
     extract_mismatch_threshold,
@@ -46,6 +47,7 @@ from magi_attention.utils import make_attn_mask_from_ffa_args
 from magi_attention.utils.general import set_random_seed, str2seed
 
 Ranges = list[list[int]]
+Relations = list[tuple[list[int], list[int], int]]
 
 # Major arches whose kernels consume q/k ranges natively: overlapping q ranges
 # (atomic O merge), per-range mask types, RangeMerge, sink, non-input out dtype.
@@ -400,3 +402,73 @@ def dsink_reference(
 
 DSINK_ATOL = 2e-4
 DSINK_RTOL = 0.1
+
+
+def assert_cuda_graph_matches_eager(
+    fn: Callable[..., Sequence[torch.Tensor]],
+    capture_inputs: Sequence[torch.Tensor],
+    replay_inputs_list: Sequence[Sequence[torch.Tensor]],
+    *,
+    check: Callable[[int, Sequence[torch.Tensor], Sequence[torch.Tensor]], None]
+    | None = None,
+    test_case: str = "",
+) -> list[tuple[torch.Tensor, ...]]:
+    """Capture ``fn`` on a cloned static buffer set and verify every replay."""
+    static = [t.clone() for t in capture_inputs]
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        fn(*static)
+    torch.cuda.current_stream().wait_stream(side)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        static_out = fn(*static)
+
+    replayed: list[tuple[torch.Tensor, ...]] = []
+    for step, inputs in enumerate(replay_inputs_list):
+        for dst, src in zip(static, inputs, strict=True):
+            dst.copy_(src)
+        graph.replay()
+        torch.cuda.synchronize()
+        got = tuple(t.clone() for t in static_out)
+        eager = tuple(fn(*inputs))
+        torch.cuda.synchronize()
+        if check is not None:
+            check(step, got, eager)
+        else:
+            for idx, (g, w) in enumerate(zip(got, eager, strict=True)):
+                assert_equal(
+                    g,
+                    w,
+                    test_case=f"{test_case}[replay={step}][{idx}]"
+                    if test_case
+                    else f"tensor[{idx}]",
+                    print_rank=-1,
+                    print_no_mismatch=False,
+                )
+        replayed.append(got)
+    return replayed
+
+
+def overlapping_relations(
+    len_qs: Sequence[int], coverage: int, mask_types: Sequence[int]
+) -> tuple[Relations, int, int]:
+    """Per q length, ``coverage`` relations over shifted, unaligned q ranges,
+    each against its own K range; returns (relations, total_q, total_k)."""
+    relations: Relations = []
+    q_cursor, k_cursor, i = 0, 0, 0
+    for len_q in len_qs:
+        q_start = q_cursor + 3
+        for c in range(coverage):
+            len_k = len_q + 37
+            relations.append(
+                (
+                    [q_start + c, q_start + c + len_q],
+                    [k_cursor, k_cursor + len_k],
+                    mask_types[i % len(mask_types)],
+                )
+            )
+            k_cursor += len_k
+            i += 1
+        q_cursor = q_start + coverage + len_q
+    return relations, q_cursor + 5, k_cursor
