@@ -43,13 +43,12 @@ class BlockInfo:
         seqlen_k: Int32,
         m_block: Int32,
     ) -> Tuple[Int32, Int32]:
+        pf = self.qhead_per_kvhead_packgqa
         n_block_max = cute.ceil_div(seqlen_k, self.tile_n)
         if const_expr(
             self.is_causal or (self.is_local and self.window_size_right is not None)
         ):
-            m_idx_max = (m_block + 1) * self.tile_m
-            if const_expr(self.qhead_per_kvhead_packgqa > 1):
-                m_idx_max = cute.ceil_div(m_idx_max, self.qhead_per_kvhead_packgqa)
+            m_idx_max = cute.ceil_div((m_block + 1) * self.tile_m, pf)
             n_idx = m_idx_max + seqlen_k - seqlen_q
             n_idx_right = (
                 n_idx if const_expr(self.is_causal) else n_idx + self.window_size_right
@@ -57,9 +56,7 @@ class BlockInfo:
             n_block_max = min(n_block_max, cute.ceil_div(n_idx_right, self.tile_n))
         n_block_min = 0
         if const_expr(self.is_local and self.window_size_left is not None):
-            m_idx_min = m_block * self.tile_m
-            if const_expr(self.qhead_per_kvhead_packgqa > 1):
-                m_idx_min = m_idx_min // self.qhead_per_kvhead_packgqa
+            m_idx_min = (m_block * self.tile_m) // pf
             n_idx = m_idx_min + seqlen_k - seqlen_q
             n_idx_left = n_idx - self.window_size_left
             n_block_min = cutlass.max(n_idx_left // self.tile_n, 0)
@@ -73,18 +70,15 @@ class BlockInfo:
         m_block: Int32,
         attn_type: Int32,
     ) -> Tuple[Int32, Int32]:
+        pf = self.qhead_per_kvhead_packgqa
         n_block_max = cute.ceil_div(seqlen_k, self.tile_n)
         if attn_type == MT_MAP.causal or attn_type == MT_MAP.bi_causal:
-            m_idx_max = (m_block + 1) * self.tile_m
-            if const_expr(self.qhead_per_kvhead_packgqa > 1):
-                m_idx_max = cute.ceil_div(m_idx_max, self.qhead_per_kvhead_packgqa)
+            m_idx_max = cute.ceil_div((m_block + 1) * self.tile_m, pf)
             n_idx_right = m_idx_max + seqlen_k - seqlen_q
             n_block_max = min(n_block_max, cute.ceil_div(n_idx_right, self.tile_n))
         n_block_min = Int32(0)
         if attn_type == MT_MAP.inv_causal or attn_type == MT_MAP.bi_causal:
-            m_idx_min = m_block * self.tile_m
-            if const_expr(self.qhead_per_kvhead_packgqa > 1):
-                m_idx_min = m_idx_min // self.qhead_per_kvhead_packgqa
+            m_idx_min = (m_block * self.tile_m) // pf
             n_block_min = (
                 n_block_max if m_idx_min >= seqlen_k else m_idx_min // self.tile_n
             )
@@ -100,9 +94,7 @@ class BlockInfo:
         pf = self.qhead_per_kvhead_packgqa
         if const_expr(pf > 1):
             assert not self.is_local, "packed bwd does not support local attention"
-            m_block_max = cute.ceil_div(seqlen_q * pf, self.tile_m)
-        else:
-            m_block_max = cute.ceil_div(seqlen_q, self.tile_m)
+        m_block_max = cute.ceil_div(seqlen_q * pf, self.tile_m)
         m_block_min = 0
         if const_expr(
             self.is_causal or (self.is_local and self.window_size_right is not None)
@@ -112,9 +104,7 @@ class BlockInfo:
             m_idx_right = (
                 m_idx if const_expr(self.is_causal) else m_idx - self.window_size_right
             )
-            if const_expr(pf > 1):
-                m_idx_right = m_idx_right * pf
-            m_block_min = max(m_block_min, m_idx_right // self.tile_m)
+            m_block_min = max(m_block_min, (m_idx_right * pf) // self.tile_m)
         if const_expr(self.is_local and self.window_size_left is not None):
             n_idx_max = (n_block + 1) * self.tile_n
             m_idx = n_idx_max + seqlen_q - seqlen_k
@@ -131,22 +121,15 @@ class BlockInfo:
         attn_type: Int32,
     ) -> Tuple[Int32, Int32]:
         pf = self.qhead_per_kvhead_packgqa
-        if const_expr(pf > 1):
-            m_block_max = cute.ceil_div(seqlen_q * pf, self.tile_m)
-        else:
-            m_block_max = cute.ceil_div(seqlen_q, self.tile_m)
+        m_block_max = cute.ceil_div(seqlen_q * pf, self.tile_m)
         if attn_type == MT_MAP.inv_causal or attn_type == MT_MAP.bi_causal:
-            n_idx_max = min(seqlen_k, (n_block + 1) * self.tile_n)
-            if const_expr(pf > 1):
-                n_idx_max = n_idx_max * pf
+            n_idx_max = min(seqlen_k, (n_block + 1) * self.tile_n) * pf
             m_block_max = min(m_block_max, cute.ceil_div(n_idx_max, self.tile_m))
         m_block_min = Int32(0)
         if attn_type == MT_MAP.causal or attn_type == MT_MAP.bi_causal:
             n_idx_min = n_block * self.tile_n
             m_idx_right = n_idx_min + seqlen_q - seqlen_k
-            if const_expr(pf > 1):
-                m_idx_right = m_idx_right * pf
-            m_block_min = max(m_block_min, m_idx_right // self.tile_m)
+            m_block_min = max(m_block_min, (m_idx_right * pf) // self.tile_m)
         return m_block_min, m_block_max
 
     @cute.jit
@@ -176,10 +159,7 @@ class BlockInfo:
 
     @cute.jit
     def _m_block_upper(self, seqlen_q: Int32) -> Int32:
-        pf = self.qhead_per_kvhead_packgqa
-        if const_expr(pf > 1):
-            return cute.ceil_div(seqlen_q * pf, self.tile_m)
-        return cute.ceil_div(seqlen_q, self.tile_m)
+        return cute.ceil_div(seqlen_q * self.qhead_per_kvhead_packgqa, self.tile_m)
 
     @cute.jit
     def get_n_block_min_max(
@@ -278,9 +258,7 @@ class BlockInfo:
         n_block_min: Int32,
     ) -> Int32:
         """If we have separate iterations with causal or local masking at the start, where do we stop"""
-        m_idx_min = m_block * self.tile_m
-        if const_expr(self.qhead_per_kvhead_packgqa > 1):
-            m_idx_min = m_idx_min // self.qhead_per_kvhead_packgqa
+        m_idx_min = (m_block * self.tile_m) // self.qhead_per_kvhead_packgqa
         n_idx = m_idx_min + seqlen_info.seqlen_k - seqlen_info.seqlen_q
         n_idx_right = (
             n_idx
@@ -306,9 +284,7 @@ class BlockInfo:
         # No early return: CuteDSL forbids return inside a dynamic `if`.
         result = n_block_max
         if attn_type == MT_MAP.causal or attn_type == MT_MAP.bi_causal:
-            m_idx_min = m_block * self.tile_m
-            if const_expr(self.qhead_per_kvhead_packgqa > 1):
-                m_idx_min = m_idx_min // self.qhead_per_kvhead_packgqa
+            m_idx_min = (m_block * self.tile_m) // self.qhead_per_kvhead_packgqa
             n_idx_right = m_idx_min + seqlen_info.seqlen_k - seqlen_info.seqlen_q
             result = cutlass.max(n_block_min, n_idx_right // self.tile_n)
         return result
@@ -324,9 +300,9 @@ class BlockInfo:
         if const_expr(not self.is_local or self.window_size_left is None):
             return n_block_min
         else:
-            m_idx_max = (m_block + 1) * self.tile_m
-            if const_expr(self.qhead_per_kvhead_packgqa > 1):
-                m_idx_max = cute.ceil_div(m_idx_max, self.qhead_per_kvhead_packgqa)
+            m_idx_max = cute.ceil_div(
+                (m_block + 1) * self.tile_m, self.qhead_per_kvhead_packgqa
+            )
             n_idx = m_idx_max + seqlen_info.seqlen_k - seqlen_info.seqlen_q
             n_idx_left = n_idx - self.window_size_left
             return cutlass.max(n_block_min, cute.ceil_div(n_idx_left, self.tile_n))
@@ -349,9 +325,9 @@ class BlockInfo:
         # No early return: CuteDSL forbids return inside a dynamic `if`.
         result = n_block_min
         if attn_type == MT_MAP.inv_causal or attn_type == MT_MAP.bi_causal:
-            m_idx_max = (m_block + 1) * self.tile_m
-            if const_expr(self.qhead_per_kvhead_packgqa > 1):
-                m_idx_max = cute.ceil_div(m_idx_max, self.qhead_per_kvhead_packgqa)
+            m_idx_max = cute.ceil_div(
+                (m_block + 1) * self.tile_m, self.qhead_per_kvhead_packgqa
+            )
             result = cutlass.min(n_block_max, cute.ceil_div(m_idx_max, self.tile_n))
         return result
 
@@ -363,14 +339,28 @@ class BlockInfo:
     ) -> Int32:
         n_block_max = cute.ceil_div(seqlen_info.seqlen_k, self.tile_n)
         if const_expr(self.is_causal or self.window_size_right is not None):
-            m_idx_max = (m_block + 1) * self.tile_m
-            if const_expr(self.qhead_per_kvhead_packgqa > 1):
-                m_idx_max = cute.ceil_div(m_idx_max, self.qhead_per_kvhead_packgqa)
+            m_idx_max = cute.ceil_div(
+                (m_block + 1) * self.tile_m, self.qhead_per_kvhead_packgqa
+            )
             n_idx_right = m_idx_max + seqlen_info.seqlen_k - seqlen_info.seqlen_q
             if const_expr(self.window_size_right is not None):
                 n_idx_right += self.window_size_right
             n_block_max = min(n_block_max, cute.ceil_div(n_idx_right, self.tile_n))
         return n_block_max
+
+    @cute.jit
+    def _guarded_bounds(self, core, upper, seqlen_q, seqlen_k, block, *extra):
+        """Total wrapper around a ``*_block_bounds`` core: empty ranges, empty
+        sequences, and out-of-range block indices all yield the empty interval,
+        and the core's output is normalized to a monotone interval. Runs
+        entirely at trace time inside the caller's compilation."""
+        lo, hi = Int32(0), Int32(0)
+        if seqlen_q > 0 and seqlen_k > 0:
+            if block >= 0 and block < upper:
+                lo, hi = self._normalize_bounds(
+                    *core(seqlen_q, seqlen_k, block, *extra)
+                )
+        return lo, hi
 
     @cute.jit
     def get_m_block_min_max_seqlens(
@@ -379,13 +369,13 @@ class BlockInfo:
         seqlen_k: Int32,
         n_block: Int32,
     ) -> Tuple[Int32, Int32]:
-        lo, hi = Int32(0), Int32(0)
-        if seqlen_q > 0 and seqlen_k > 0:
-            if n_block >= 0 and n_block < cute.ceil_div(seqlen_k, self.tile_n):
-                lo, hi = self._normalize_bounds(
-                    *self._m_block_bounds(seqlen_q, seqlen_k, n_block)
-                )
-        return lo, hi
+        return self._guarded_bounds(
+            self._m_block_bounds,
+            cute.ceil_div(seqlen_k, self.tile_n),
+            seqlen_q,
+            seqlen_k,
+            n_block,
+        )
 
     @cute.jit
     def get_m_block_min_max_per_range_seqlens(
@@ -395,15 +385,14 @@ class BlockInfo:
         n_block: Int32,
         attn_type: Int32,
     ) -> Tuple[Int32, Int32]:
-        lo, hi = Int32(0), Int32(0)
-        if seqlen_q > 0 and seqlen_k > 0:
-            if n_block >= 0 and n_block < cute.ceil_div(seqlen_k, self.tile_n):
-                lo, hi = self._normalize_bounds(
-                    *self._m_block_bounds_per_range(
-                        seqlen_q, seqlen_k, n_block, attn_type
-                    )
-                )
-        return lo, hi
+        return self._guarded_bounds(
+            self._m_block_bounds_per_range,
+            cute.ceil_div(seqlen_k, self.tile_n),
+            seqlen_q,
+            seqlen_k,
+            n_block,
+            attn_type,
+        )
 
     @cute.jit
     def get_n_block_min_max_seqlens(
@@ -415,13 +404,13 @@ class BlockInfo:
         """Exact dual of get_m_block_min_max_seqlens (unsplit K range)."""
         if const_expr(self.qhead_per_kvhead_packgqa > 1):
             assert not self.is_local, "packed bwd does not support local attention"
-        lo, hi = Int32(0), Int32(0)
-        if seqlen_q > 0 and seqlen_k > 0:
-            if m_block >= 0 and m_block < self._m_block_upper(seqlen_q):
-                lo, hi = self._normalize_bounds(
-                    *self._n_block_bounds(seqlen_q, seqlen_k, m_block)
-                )
-        return lo, hi
+        return self._guarded_bounds(
+            self._n_block_bounds,
+            self._m_block_upper(seqlen_q),
+            seqlen_q,
+            seqlen_k,
+            m_block,
+        )
 
     @cute.jit
     def get_n_block_min_max_per_range_seqlens(
@@ -432,12 +421,11 @@ class BlockInfo:
         attn_type: Int32,
     ) -> Tuple[Int32, Int32]:
         """Exact dual of get_m_block_min_max_per_range_seqlens (unsplit K range)."""
-        lo, hi = Int32(0), Int32(0)
-        if seqlen_q > 0 and seqlen_k > 0:
-            if m_block >= 0 and m_block < self._m_block_upper(seqlen_q):
-                lo, hi = self._normalize_bounds(
-                    *self._n_block_bounds_per_range(
-                        seqlen_q, seqlen_k, m_block, attn_type
-                    )
-                )
-        return lo, hi
+        return self._guarded_bounds(
+            self._n_block_bounds_per_range,
+            self._m_block_upper(seqlen_q),
+            seqlen_q,
+            seqlen_k,
+            m_block,
+            attn_type,
+        )

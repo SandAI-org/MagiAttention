@@ -24,7 +24,6 @@ from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.kernel.cutedsl.block_info import BlockInfo
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP, get_device_arch
-from magi_attention.kernel.cutedsl.seqlen_info import SeqlenInfoQK
 from magi_attention.testing import parameterize
 
 
@@ -39,7 +38,6 @@ class _BlockInfoDualLauncher:
         window_right: int | None,
         pack_factor: int,
         per_range: bool,
-        compare_legacy_m: bool = False,
     ):
         self.tile_m = tile_m
         self.tile_n = tile_n
@@ -49,7 +47,6 @@ class _BlockInfoDualLauncher:
         self.window_right = window_right
         self.pack_factor = pack_factor
         self.per_range = per_range
-        self.compare_legacy_m = compare_legacy_m
 
     @cute.jit
     def __call__(
@@ -100,151 +97,17 @@ class _BlockInfoDualLauncher:
             sq = Int32(mSeqQ[i])
             sk = Int32(mSeqK[i])
             idx = Int32(mIdx[i])
-            if cutlass.const_expr(self.compare_legacy_m):
+            if cutlass.const_expr(self.per_range):
                 at = Int32(mAttn[i])
-                seqlen_info = SeqlenInfoQK.create(
-                    batch_idx=Int32(0),
-                    seqlen_q_static=sq,
-                    seqlen_k_static=sk,
-                    tile_m=self.tile_m,
-                    tile_n=self.tile_n,
-                )
-                flo, fhi = info.get_m_block_min_max_per_range(seqlen_info, idx, at)
-                dlo, dhi = info.get_m_block_min_max_per_range_seqlens(sq, sk, idx, at)
+                flo, fhi = info.get_m_block_min_max_per_range_seqlens(sq, sk, idx, at)
+                dlo, dhi = info.get_n_block_min_max_per_range_seqlens(sq, sk, idx, at)
             else:
-                if cutlass.const_expr(self.per_range):
-                    at = Int32(mAttn[i])
-                    flo, fhi = info.get_m_block_min_max_per_range_seqlens(
-                        sq, sk, idx, at
-                    )
-                    dlo, dhi = info.get_n_block_min_max_per_range_seqlens(
-                        sq, sk, idx, at
-                    )
-                else:
-                    flo, fhi = info.get_m_block_min_max_seqlens(sq, sk, idx)
-                    dlo, dhi = info.get_n_block_min_max_seqlens(sq, sk, idx)
+                flo, fhi = info.get_m_block_min_max_seqlens(sq, sk, idx)
+                dlo, dhi = info.get_n_block_min_max_seqlens(sq, sk, idx)
             mFwdLo[i] = flo
             mFwdHi[i] = fhi
             mDualLo[i] = dlo
             mDualHi[i] = dhi
-
-
-class _BlockInfoSplitKVLauncher:
-    def __init__(
-        self,
-        tile_m: int,
-        tile_n: int,
-        is_causal: bool,
-        is_local: bool,
-        window_left: int | None,
-        window_right: int | None,
-        pack_factor: int,
-        per_range: bool,
-    ):
-        self.tile_m = tile_m
-        self.tile_n = tile_n
-        self.is_causal = is_causal
-        self.is_local = is_local
-        self.window_left = window_left
-        self.window_right = window_right
-        self.pack_factor = pack_factor
-        self.per_range = per_range
-
-    @cute.jit
-    def __call__(
-        self,
-        mSeqQ: cute.Tensor,
-        mSeqK: cute.Tensor,
-        mMBlock: cute.Tensor,
-        mAttn: cute.Tensor,
-        mSplitIdx: cute.Tensor,
-        mNumSplits: cute.Tensor,
-        mBaseLo: cute.Tensor,
-        mBaseHi: cute.Tensor,
-        mSplitLo: cute.Tensor,
-        mSplitHi: cute.Tensor,
-        count: Int32,
-        stream: cuda.CUstream,
-    ):
-        grid_x = (count + 127) // 128
-        self.kernel(
-            mSeqQ,
-            mSeqK,
-            mMBlock,
-            mAttn,
-            mSplitIdx,
-            mNumSplits,
-            mBaseLo,
-            mBaseHi,
-            mSplitLo,
-            mSplitHi,
-            count,
-        ).launch(grid=(grid_x, 1, 1), block=(128, 1, 1), stream=stream)
-
-    @cute.kernel
-    def kernel(
-        self,
-        mSeqQ: cute.Tensor,
-        mSeqK: cute.Tensor,
-        mMBlock: cute.Tensor,
-        mAttn: cute.Tensor,
-        mSplitIdx: cute.Tensor,
-        mNumSplits: cute.Tensor,
-        mBaseLo: cute.Tensor,
-        mBaseHi: cute.Tensor,
-        mSplitLo: cute.Tensor,
-        mSplitHi: cute.Tensor,
-        count: Int32,
-    ):
-        wl = Int32(self.window_left) if self.window_left is not None else None
-        wr = Int32(self.window_right) if self.window_right is not None else None
-        base_info = BlockInfo(
-            self.tile_m,
-            self.tile_n,
-            self.is_causal,
-            self.is_local,
-            False,
-            wl,
-            wr,
-            qhead_per_kvhead_packgqa=self.pack_factor,
-        )
-        split_info = BlockInfo(
-            self.tile_m,
-            self.tile_n,
-            self.is_causal,
-            self.is_local,
-            True,
-            wl,
-            wr,
-            qhead_per_kvhead_packgqa=self.pack_factor,
-        )
-        i = cute.arch.block_idx()[0] * 128 + cute.arch.thread_idx()[0]
-        if i < count:
-            sq = Int32(mSeqQ[i])
-            sk = Int32(mSeqK[i])
-            mb = Int32(mMBlock[i])
-            sp = Int32(mSplitIdx[i])
-            ns = Int32(mNumSplits[i])
-            seqlen_info = SeqlenInfoQK.create(
-                batch_idx=Int32(0),
-                seqlen_q_static=sq,
-                seqlen_k_static=sk,
-                tile_m=self.tile_m,
-                tile_n=self.tile_n,
-            )
-            if cutlass.const_expr(self.per_range):
-                at = Int32(mAttn[i])
-                blo, bhi = base_info.get_n_block_min_max_per_range(seqlen_info, mb, at)
-                slo, shi = split_info.get_n_block_min_max_per_range(
-                    seqlen_info, mb, at, sp, ns
-                )
-            else:
-                blo, bhi = base_info.get_n_block_min_max(seqlen_info, mb)
-                slo, shi = split_info.get_n_block_min_max(seqlen_info, mb, sp, ns)
-            mBaseLo[i] = blo
-            mBaseHi[i] = bhi
-            mSplitLo[i] = slo
-            mSplitHi[i] = shi
 
 
 class TestBlockInfoDualBounds(TestCase):
@@ -378,29 +241,6 @@ class TestBlockInfoDualBounds(TestCase):
         )
 
     def test_empty_and_inverted_bounds_on_device(self):
-        # Counterexample: seqlen_q=512, seqlen_k=128, tile=128, bi_causal, n_block=0.
-        # Legacy get_m_block_min_max_per_range returns (3, 1); *_seqlens normalizes to (1, 1).
-        legacy_launcher = _BlockInfoDualLauncher(
-            128, 128, True, False, None, None, 1, per_range=True, compare_legacy_m=True
-        )
-        cases = [
-            (512, 128, 0, MT_MAP.bi_causal),
-            (512, 128, 1, MT_MAP.full),  # oob n_block on non-empty seqs
-            (512, 128, -1, MT_MAP.full),  # negative n_block
-            (0, 128, 0, MT_MAP.full),  # empty Q
-            (512, 0, 0, MT_MAP.full),  # empty K
-        ]
-        sq = torch.tensor([c[0] for c in cases], dtype=torch.int32)
-        sk = torch.tensor([c[1] for c in cases], dtype=torch.int32)
-        idx = torch.tensor([c[2] for c in cases], dtype=torch.int32)
-        at = torch.tensor([c[3] for c in cases], dtype=torch.int32)
-        out = self._eval_device(legacy_launcher, sq, sk, idx, at)
-        raw_lo, raw_hi, norm_lo, norm_hi = out.tolist()
-        self.assertEqual((raw_lo[0], raw_hi[0]), (3, 1))
-        self.assertEqual((norm_lo[0], norm_hi[0]), (1, 1))
-        for k in range(1, len(cases)):
-            self.assertEqual((norm_lo[k], norm_hi[k]), (0, 0))
-
         # Check *_seqlens normalization on both directions for negative n_idx_right,
         # inverted bi_causal, empty sequences, and oob indices.
         dual_per_range = _BlockInfoDualLauncher(
@@ -452,108 +292,6 @@ class TestBlockInfoDualBounds(TestCase):
         for k in range(1, 4):
             self.assertEqual((sm_lo[k], sm_hi[k]), (0, 0))
             self.assertEqual((sn_lo[k], sn_hi[k]), (0, 0))
-
-    @parameterize(
-        "spec",
-        [
-            (False, False, None, None, 1, 128, False),
-            (True, False, None, None, 1, 128, False),
-            (False, True, 64, 128, 1, 128, False),
-            (False, True, 64, 128, 2, 128, False),
-            (True, False, None, None, 1, 128, True),
-            (True, False, None, None, 2, 128, True),
-        ],
-    )
-    def test_split_kv_bounds_on_device(self, spec):
-        is_causal, is_local, wl, wr, pack_factor, tile_n, per_range = spec
-        launcher = _BlockInfoSplitKVLauncher(
-            128, tile_n, is_causal, is_local, wl, wr, pack_factor, per_range
-        )
-        attn_types = (
-            [MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal]
-            if per_range
-            else [0]
-        )
-        rows = []
-        for sq, sk in [(128, 512), (512, 128), (257, 640), (384, 384)]:
-            num_m = (sq * pack_factor + 127) // 128
-            for mb in range(num_m):
-                for at in attn_types:
-                    for ns in (1, 2, 3, 4):
-                        for sp in range(ns):
-                            rows.append((sq, sk, mb, at, sp, ns))
-        count = len(rows)
-        tensors = [
-            torch.tensor([r[c] for r in rows], dtype=torch.int32, device="cuda")
-            for c in range(6)
-        ]
-        sq_t, sk_t, mb_t, at_t, sp_t, ns_t = tensors
-        blo = torch.empty(count, dtype=torch.int32, device="cuda")
-        bhi = torch.empty(count, dtype=torch.int32, device="cuda")
-        slo = torch.empty(count, dtype=torch.int32, device="cuda")
-        shi = torch.empty(count, dtype=torch.int32, device="cuda")
-        args = (
-            from_dlpack(sq_t),
-            from_dlpack(sk_t),
-            from_dlpack(mb_t),
-            from_dlpack(at_t),
-            from_dlpack(sp_t),
-            from_dlpack(ns_t),
-            from_dlpack(blo),
-            from_dlpack(bhi),
-            from_dlpack(slo),
-            from_dlpack(shi),
-            Int32(count),
-            cuda.CUstream(torch.cuda.current_stream().cuda_stream),
-        )
-        cute.compile(launcher, *args)(*args)
-        blo_h, bhi_h, slo_h, shi_h = (t.cpu().tolist() for t in (blo, bhi, slo, shi))
-
-        def _cdiv(a: int, b: int) -> int:
-            return (a + b - 1) // b
-
-        for i, (sq, sk, mb, at, sp, ns) in enumerate(rows):
-            ref_hi = _cdiv(sk, tile_n)
-            ref_lo = 0
-            if per_range:
-                if at in (MT_MAP.causal, MT_MAP.bi_causal):
-                    m_max = (mb + 1) * 128
-                    if pack_factor > 1:
-                        m_max = _cdiv(m_max, pack_factor)
-                    ref_hi = min(ref_hi, _cdiv(m_max + sk - sq, tile_n))
-                if at in (MT_MAP.inv_causal, MT_MAP.bi_causal):
-                    m_min = mb * 128
-                    if pack_factor > 1:
-                        m_min = m_min // pack_factor
-                    ref_lo = ref_hi if m_min >= sk else m_min // tile_n
-            else:
-                if is_causal or (is_local and wr is not None):
-                    m_max = (mb + 1) * 128
-                    if pack_factor > 1:
-                        m_max = _cdiv(m_max, pack_factor)
-                    n_idx = m_max + sk - sq
-                    n_right = n_idx if is_causal else n_idx + wr
-                    ref_hi = min(ref_hi, _cdiv(n_right, tile_n))
-                if is_local and wl is not None:
-                    m_min = mb * 128
-                    if pack_factor > 1:
-                        m_min = m_min // pack_factor
-                    n_left = m_min + sk - sq - wl
-                    ref_lo = max(n_left // tile_n, 0)
-            base_lo, base_hi = blo_h[i], bhi_h[i]
-            self.assertEqual(
-                (base_lo, base_hi),
-                (ref_lo, ref_hi),
-                f"base mismatch spec={spec} row={(sq, sk, mb, at, sp, ns)}",
-            )
-            per_split = 0 if base_hi <= base_lo else (base_hi - base_lo + ns - 1) // ns
-            exp_lo = base_lo + sp * per_split
-            exp_hi = min(exp_lo + per_split, base_hi)
-            self.assertEqual(
-                (slo_h[i], shi_h[i]),
-                (exp_lo, exp_hi),
-                f"spec={spec} row={(sq, sk, mb, at, sp, ns)} base={(base_lo, base_hi)}",
-            )
 
 
 if __name__ == "__main__":
