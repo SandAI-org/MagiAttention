@@ -44,7 +44,7 @@ from magi_attention.utils.version import is_cutedsl_version_ge
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
-from . import range_last_writer, range_write_order, sm100_utils
+from . import range_write_order, sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
@@ -840,7 +840,11 @@ class FFAFwdSm100:
             "write order and per-CTA last-writer state are required iff deterministic"
         )
         if const_expr(self.deterministic):
-            assert mWriteOrder is not None and cute.rank(mWriteOrder) == 3
+            assert (
+                mWriteOrder is not None
+                and mLast is not None
+                and cute.rank(mWriteOrder) == 3
+            )
         assert (
             mCuBatches is not None
         ) == self.range_merge, "RangeMerge requires the cu_batches CSR (and only then)"
@@ -1548,8 +1552,15 @@ class FFAFwdSm100:
             descale_tensors,
             mMaskTypes,
             mRangeLocks,
-            mWriteOrder,
-            mLast,
+            (
+                range_write_order.WriteOrderTensors(
+                    mWriteOrder,
+                    mLast,
+                    Int32(1),
+                )
+                if const_expr(self.deterministic)
+                else None
+            ),
             mCuBatches,
             mMaxLogits,
             blocksparse_tensors,
@@ -1604,8 +1615,7 @@ class FFAFwdSm100:
         descale_tensors: Optional[DescaleTensors],
         mMaskTypes: Optional[cute.Tensor],
         mRangeLocks: Optional[cute.Tensor],
-        mWriteOrder: Optional[cute.Tensor],
-        mLast: Optional[cute.Tensor],
+        fwd_write_order: Optional[range_write_order.WriteOrderTensors],
         mCuBatches: Optional[cute.Tensor],
         mMaxLogits: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
@@ -2471,8 +2481,7 @@ class FFAFwdSm100:
                 mCuBatches=mCuBatches,
                 mRangeLocks=mRangeLocks,
                 mQRanges=mQRanges,
-                mWriteOrder=mWriteOrder,
-                mLast=mLast,
+                fwd_write_order=fwd_write_order,
                 borrow_done_mbar_ptr=borrow_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
@@ -4535,8 +4544,7 @@ class FFAFwdSm100:
         mCuBatches: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
         mQRanges: Optional[cute.Tensor] = None,
-        mWriteOrder: Optional[cute.Tensor] = None,
-        mLast: Optional[cute.Tensor] = None,
+        fwd_write_order: Optional[range_write_order.WriteOrderTensors] = None,
         borrow_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
@@ -4564,7 +4572,7 @@ class FFAFwdSm100:
         sm_stats_consumer_phase = Int32(0)
         o_corr_consumer_phase = Int32(0)
         corr_epi_producer_phase = Int32(1)
-        fwd_slot = range_last_writer.cta_slot()
+        fwd_slot = cute.arch.block_idx()[0]
         fwd_folded = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
@@ -4578,11 +4586,11 @@ class FFAFwdSm100:
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
             if const_expr(self.deterministic):
-                assert mQRanges is not None and mLast is not None
+                assert mQRanges is not None and fwd_write_order is not None
                 if fwd_folded < batch_idx:
-                    range_last_writer.fold_fwd_last(
+                    range_write_order.fold_fwd_last(
                         mQRanges,
-                        mLast,
+                        fwd_write_order.mLast,
                         fwd_slot,
                         fwd_folded,
                         batch_idx,
@@ -5037,17 +5045,18 @@ class FFAFwdSm100:
                             )
                         if tile_has_rows:
                             if const_expr(self.deterministic):
-                                assert mWriteOrder is not None
-                                assert mLast is not None
+                                assert fwd_write_order is not None
                                 if tidx == 0:
-                                    (
-                                        pred_left,
-                                        pred_right,
-                                    ) = range_write_order.last_writers(
-                                        mLast, fwd_slot, left_block, right_block
+                                    pred_left = range_write_order.last_writer(
+                                        fwd_write_order, fwd_slot, left_block
                                     )
-                                    range_write_order.wait_published_blocks(
-                                        mWriteOrder,
+                                    pred_right = pred_left
+                                    if right_block != left_block:
+                                        pred_right = range_write_order.last_writer(
+                                            fwd_write_order, fwd_slot, right_block
+                                        )
+                                    range_write_order.wait_blocks(
+                                        fwd_write_order,
                                         left_block,
                                         right_block,
                                         head_idx,
@@ -5133,14 +5142,14 @@ class FFAFwdSm100:
                             )
                             if tidx == 0:
                                 if const_expr(self.deterministic):
-                                    assert mWriteOrder is not None
+                                    assert fwd_write_order is not None
                                     range_write_order.arrive_blocks(
-                                        mWriteOrder,
+                                        fwd_write_order,
                                         left_block,
                                         right_block,
                                         head_idx,
-                                        range_last_writer.writer_number(
-                                            batch_idx, Int32(1), Int32(0)
+                                        range_write_order.writer_number(
+                                            fwd_write_order, batch_idx
                                         ),
                                         left_weight,
                                         right_weight,

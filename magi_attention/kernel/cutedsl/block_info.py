@@ -368,7 +368,18 @@ class BlockInfo:
         seqlen_q: Int32,
         seqlen_k: Int32,
         n_block: Int32,
+        attn_type: Optional[Int32] = None,
     ) -> Tuple[Int32, Int32]:
+        if const_expr(attn_type is not None):
+            assert attn_type is not None
+            return self._guarded_bounds(
+                self._m_block_bounds_per_range,
+                cute.ceil_div(seqlen_k, self.tile_n),
+                seqlen_q,
+                seqlen_k,
+                n_block,
+                attn_type,
+            )
         return self._guarded_bounds(
             self._m_block_bounds,
             cute.ceil_div(seqlen_k, self.tile_n),
@@ -378,30 +389,24 @@ class BlockInfo:
         )
 
     @cute.jit
-    def get_m_block_min_max_per_range_seqlens(
-        self,
-        seqlen_q: Int32,
-        seqlen_k: Int32,
-        n_block: Int32,
-        attn_type: Int32,
-    ) -> Tuple[Int32, Int32]:
-        return self._guarded_bounds(
-            self._m_block_bounds_per_range,
-            cute.ceil_div(seqlen_k, self.tile_n),
-            seqlen_q,
-            seqlen_k,
-            n_block,
-            attn_type,
-        )
-
-    @cute.jit
     def get_n_block_min_max_seqlens(
         self,
         seqlen_q: Int32,
         seqlen_k: Int32,
         m_block: Int32,
+        attn_type: Optional[Int32] = None,
     ) -> Tuple[Int32, Int32]:
         """Exact dual of get_m_block_min_max_seqlens (unsplit K range)."""
+        if const_expr(attn_type is not None):
+            assert attn_type is not None
+            return self._guarded_bounds(
+                self._n_block_bounds_per_range,
+                self._m_block_upper(seqlen_q),
+                seqlen_q,
+                seqlen_k,
+                m_block,
+                attn_type,
+            )
         if const_expr(self.qhead_per_kvhead_packgqa > 1):
             assert not self.is_local, "packed bwd does not support local attention"
         return self._guarded_bounds(
@@ -410,22 +415,4 @@ class BlockInfo:
             seqlen_q,
             seqlen_k,
             m_block,
-        )
-
-    @cute.jit
-    def get_n_block_min_max_per_range_seqlens(
-        self,
-        seqlen_q: Int32,
-        seqlen_k: Int32,
-        m_block: Int32,
-        attn_type: Int32,
-    ) -> Tuple[Int32, Int32]:
-        """Exact dual of get_m_block_min_max_per_range_seqlens (unsplit K range)."""
-        return self._guarded_bounds(
-            self._n_block_bounds_per_range,
-            self._m_block_upper(seqlen_q),
-            seqlen_q,
-            seqlen_k,
-            m_block,
-            attn_type,
         )

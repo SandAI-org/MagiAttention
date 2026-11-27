@@ -99,8 +99,8 @@ class _BlockInfoDualLauncher:
             idx = Int32(mIdx[i])
             if cutlass.const_expr(self.per_range):
                 at = Int32(mAttn[i])
-                flo, fhi = info.get_m_block_min_max_per_range_seqlens(sq, sk, idx, at)
-                dlo, dhi = info.get_n_block_min_max_per_range_seqlens(sq, sk, idx, at)
+                flo, fhi = info.get_m_block_min_max_seqlens(sq, sk, idx, at)
+                dlo, dhi = info.get_n_block_min_max_seqlens(sq, sk, idx, at)
             else:
                 flo, fhi = info.get_m_block_min_max_seqlens(sq, sk, idx)
                 dlo, dhi = info.get_n_block_min_max_seqlens(sq, sk, idx)
@@ -269,12 +269,18 @@ class TestBlockInfoDualBounds(TestCase):
         self.assertEqual((n_lo[1], n_hi[1]), (0, 0))
         self.assertEqual((n_lo[2], n_hi[2]), (0, 0))
         self.assertEqual((n_lo[3], n_hi[3]), (1, 1))
-        for k in range(4, len(per_range_cases)):
-            self.assertEqual((m_lo[k], m_hi[k]), (0, 0))
-            self.assertEqual((n_lo[k], n_hi[k]), (0, 0))
-        for k in range(len(per_range_cases)):
-            self.assertTrue(0 <= m_lo[k] <= m_hi[k])
-            self.assertTrue(0 <= n_lo[k] <= n_hi[k])
+        self.assertEqual((m_lo[4], m_hi[4]), (0, 0))
+        self.assertEqual((n_lo[4], n_hi[4]), (0, 0))
+        self.assertEqual((m_lo[5], m_hi[5]), (0, 0))
+        self.assertEqual((n_lo[5], n_hi[5]), (0, 0))
+        self.assertEqual((m_lo[6], m_hi[6]), (0, 0))
+        self.assertEqual((n_lo[6], n_hi[6]), (0, 0))
+        self.assertEqual((m_lo[7], m_hi[7]), (0, 0))
+        self.assertEqual((n_lo[7], n_hi[7]), (0, 0))
+        self.assertTrue(0 <= m_lo[0] <= m_hi[0])
+        self.assertTrue(0 <= m_lo[1] <= m_hi[1])
+        self.assertTrue(0 <= m_lo[2] <= m_hi[2])
+        self.assertTrue(0 <= m_lo[3] <= m_hi[3])
 
         dual_static = _BlockInfoDualLauncher(
             128, 128, True, False, None, None, 1, per_range=False
@@ -289,9 +295,12 @@ class TestBlockInfoDualBounds(TestCase):
         sm_lo, sm_hi, sn_lo, sn_hi = st_out.tolist()
         self.assertEqual((sn_lo[0], sn_hi[0]), (0, 0))
         self.assertEqual((sm_lo[0], sm_hi[0]), (3, 4))
-        for k in range(1, 4):
-            self.assertEqual((sm_lo[k], sm_hi[k]), (0, 0))
-            self.assertEqual((sn_lo[k], sn_hi[k]), (0, 0))
+        self.assertEqual((sm_lo[1], sm_hi[1]), (0, 0))
+        self.assertEqual((sn_lo[1], sn_hi[1]), (0, 0))
+        self.assertEqual((sm_lo[2], sm_hi[2]), (0, 0))
+        self.assertEqual((sn_lo[2], sn_hi[2]), (0, 0))
+        self.assertEqual((sm_lo[3], sm_hi[3]), (0, 0))
+        self.assertEqual((sn_lo[3], sn_hi[3]), (0, 0))
 
 
 if __name__ == "__main__":
