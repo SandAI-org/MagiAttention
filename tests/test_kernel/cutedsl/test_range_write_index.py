@@ -14,7 +14,6 @@
 
 import math
 import unittest
-from dataclasses import dataclass
 from typing import Optional
 from unittest import TestCase
 
@@ -29,19 +28,12 @@ from torch.testing._internal.common_utils import run_tests
 from magi_attention.kernel.cutedsl import range_write_index
 from magi_attention.kernel.cutedsl.block_info import BlockInfo
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
-from magi_attention.testing import parameterize
 from magi_attention.testing.cutedsl_utils import (
     SM100_FAMILY_REQUIRED,
     is_sm100_family,
     to_ranges_tensor,
 )
 from magi_attention.testing.precision import assert_equal
-
-
-@dataclass(frozen=True)
-class _BwdFoldCase:
-    range_merge: bool = False
-    mask_type: int | None = None
 
 
 def _ref_m_bounds_per_range(
@@ -87,21 +79,6 @@ def _ref_dq_pair_prev_k_tile_on_block(
             if m_lo <= mt < m_hi:
                 prev_n = max(prev_n, n)
     return prev_n
-
-
-def _ref_fwd_last(
-    ranges: list[list[int]],
-    num_blocks: int,
-    block_size: int,
-    rows_per_token: int = 1,
-) -> torch.Tensor:
-    running = torch.zeros(num_blocks, dtype=torch.int32)
-    for r, (s, e) in enumerate(ranges):
-        if e > s:
-            lo = s * rows_per_token // block_size
-            hi = (e * rows_per_token - 1) // block_size + 1
-            running[lo:hi] = r + 1
-    return running
 
 
 def _ref_bwd_last(
@@ -150,45 +127,6 @@ def _ref_bwd_last(
                 if active:
                     run_dkv[kb] = max(int(run_dkv[kb]), (g + 1) * dkv_stride)
     return run_dq, run_dkv
-
-
-class _FoldFwdHarness:
-    def __init__(self, block_size: int, rows_per_token: int):
-        self.block_size = block_size
-        self.rows_per_token = rows_per_token
-
-    @cute.jit
-    def __call__(
-        self,
-        mQRanges: cute.Tensor,
-        mLast: cute.Tensor,
-        range_from: Int32,
-        range_to: Int32,
-        stream: cuda.CUstream = None,
-    ):
-        self.kernel(mQRanges, mLast, range_from, range_to).launch(
-            grid=(1, 1, 1), block=(128, 1, 1), stream=stream
-        )
-
-    @cute.kernel
-    def kernel(
-        self,
-        mQRanges: cute.Tensor,
-        mLast: cute.Tensor,
-        range_from: Int32,
-        range_to: Int32,
-    ):
-        range_write_index.fold_fwd_last(
-            mQRanges,
-            mLast,
-            Int32(0),
-            range_from,
-            range_to,
-            self.block_size,
-            self.rows_per_token,
-            cute.arch.thread_idx()[0],
-            128,
-        )
 
 
 class _FoldBwdHarness:
@@ -323,97 +261,49 @@ _BWD_MERGE_FIXTURE = (
     [g + 5 * rep for rep in range(8) for g in (0, 0, 1, 2, 2, 3, 4)],
 )
 
+_TILE_M = 128
+_CLUSTER_TILE_K = 256
+_DQ_STRIDE = 8
+_DKV_STRIDE = 4
+# Split at 7 so [0, 7) exercises delta < 32 (block-parallel) and
+# [7, num_groups) exercises delta >= 32 (range-parallel).
+_FOLD_SPLIT = 7
+
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
 class TestRangeWriteFold(TestCase):
     def setUp(self) -> None:
         self.device = torch.cuda.current_device()
 
-    def _compile_fwd(self, block_size: int, rows_per_token: int):
-        sym = cute.sym_int
-        return cute.compile(
-            _FoldFwdHarness(block_size, rows_per_token),
-            _fake_i32(sym(), 2),
-            _fake_i32(sym(), sym()),
-            Int32(0),
-            Int32(0),
-            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-            options="--enable-tvm-ffi",
-        )
+    def _check_plain_fold(
+        self,
+        compile_mask: int | None,
+        masks: list[int],
+        mask_t: torch.Tensor | None,
+        mask_fake,
+        test_case: str,
+    ) -> None:
+        """fold_dq_last/fold_dkv_last of the plain fixture against the oracle.
 
-    @parameterize("rows_per_token", [1, 2, 4])
-    def test_fwd_fold_matches_reference(self, rows_per_token: int):
-        block_size = 128
-        ranges = [
-            [0, 256],
-            [128, 256],
-            [5, 300],
-            [130, 140],
-            [0, 129],
-            [33 * 4 + 7, 35 * 4],
-            [200, 200],
-            [129, 384],
-        ] * 6  # 48 ranges -> exercises >32-lane multi-round fold
-        num_blocks = max(e for _, e in ranges) * rows_per_token // block_size + 2
-        q_ranges = to_ranges_tensor(ranges, self.device)
-        m_last = torch.zeros(1, num_blocks, dtype=torch.int32, device=self.device)
-        fn = self._compile_fwd(block_size, rows_per_token)
-        # Incremental fold: [0, 12) exercises delta < 32 (warp block-parallel),
-        # [12, len) exercises delta >= 32 (thread range-parallel).
-        fn(q_ranges, m_last, 0, 12)
-        fn(q_ranges, m_last, 12, len(ranges))
-        want = _ref_fwd_last(ranges, num_blocks, block_size, rows_per_token)
-        assert_equal(m_last[0].cpu(), want, print_no_mismatch=False)
-
-    @parameterize(
-        "case",
-        [
-            _BwdFoldCase(range_merge=False, mask_type=None),
-            _BwdFoldCase(range_merge=False, mask_type=MT_MAP.full),
-            _BwdFoldCase(range_merge=False, mask_type=MT_MAP.causal),
-            _BwdFoldCase(range_merge=True, mask_type=None),
-        ],
-    )
-    def test_bwd_dq_and_dkv_fold_match_reference(self, case: _BwdFoldCase):
-        tile_m, cluster_tile_k = 128, 256
-        q_list, k_list, base_masks, group_of = (
-            _BWD_MERGE_FIXTURE if case.range_merge else _BWD_PLAIN_FIXTURE
-        )
-        masks = (
-            list(base_masks)
-            if case.mask_type is None
-            else [case.mask_type] * len(base_masks)
-        )
+        ``compile_mask=None`` runs the per-range-mask kernel reading
+        ``mMaskTypes``; an ``MT_MAP`` value compiles that mask in statically.
+        """
+        q_list, k_list, _, group_of = _BWD_PLAIN_FIXTURE
         num_groups = len(k_list)
-        cu_batches = None
-        if case.range_merge:
-            counts = [0] * num_groups
-            for g in group_of:
-                counts[g] += 1
-            cu = [0]
-            for c in counts:
-                cu.append(cu[-1] + c)
-            cu_batches = torch.tensor(cu, dtype=torch.int32, device=self.device)
-        mask_t = (
-            torch.tensor(masks, dtype=torch.int32, device=self.device)
-            if case.mask_type is None
-            else None
-        )
         q_ranges = to_ranges_tensor(q_list, self.device)
         k_ranges = to_ranges_tensor(k_list, self.device)
-        num_q_blocks = max(e for _, e in q_list) // tile_m + 2
-        num_k_blocks = max(e for _, e in k_list) // cluster_tile_k + 2
-        dq_stride, dkv_stride = 8, 4
+        num_q_blocks = max(e for _, e in q_list) // _TILE_M + 2
+        num_k_blocks = max(e for _, e in k_list) // _CLUSTER_TILE_K + 2
 
         sym = cute.sym_int
         fn = cute.compile(
-            _FoldBwdHarness(tile_m, cluster_tile_k, case.mask_type, case.range_merge),
+            _FoldBwdHarness(_TILE_M, _CLUSTER_TILE_K, compile_mask, False),
             _fake_i32(sym(), 2),
             _fake_i32(sym(), 2),
-            _fake_i32(sym()) if case.mask_type is None else None,
-            _fake_i32(sym()) if case.range_merge else None,
+            mask_fake,
+            None,
             _fake_i32(sym(), sym()),
-            None if case.range_merge else _fake_i32(sym(), sym()),
+            _fake_i32(sym(), sym()),
             Int32(0),
             Int32(0),
             Int32(0),
@@ -422,37 +312,30 @@ class TestRangeWriteFold(TestCase):
             options="--enable-tvm-ffi",
         )
         dq_last = torch.zeros(1, num_q_blocks, dtype=torch.int32, device=self.device)
-        dkv_last = (
-            None
-            if case.range_merge
-            else torch.zeros(1, num_k_blocks, dtype=torch.int32, device=self.device)
-        )
-        # Split at 7 so [0, 7) exercises delta < 32 (block-parallel) and
-        # [7, num_groups) exercises delta >= 32 (range-parallel).
-        mid = 7
+        dkv_last = torch.zeros(1, num_k_blocks, dtype=torch.int32, device=self.device)
         fn(
             q_ranges,
             k_ranges,
             mask_t,
-            cu_batches,
+            None,
             dq_last,
             dkv_last,
             0,
-            mid,
-            dq_stride,
-            dkv_stride,
+            _FOLD_SPLIT,
+            _DQ_STRIDE,
+            _DKV_STRIDE,
         )
         fn(
             q_ranges,
             k_ranges,
             mask_t,
-            cu_batches,
+            None,
             dq_last,
             dkv_last,
-            mid,
+            _FOLD_SPLIT,
             num_groups,
-            dq_stride,
-            dkv_stride,
+            _DQ_STRIDE,
+            _DKV_STRIDE,
         )
         want_dq, want_dkv = _ref_bwd_last(
             q_list,
@@ -461,16 +344,122 @@ class TestRangeWriteFold(TestCase):
             group_of,
             num_q_blocks,
             num_k_blocks,
-            tile_m,
-            cluster_tile_k,
-            dq_stride,
-            dkv_stride,
-            range_merge=case.range_merge,
+            _TILE_M,
+            _CLUSTER_TILE_K,
+            _DQ_STRIDE,
+            _DKV_STRIDE,
+            range_merge=False,
         )
-        assert_equal(dq_last[0].cpu(), want_dq, print_no_mismatch=False)
-        if not case.range_merge:
-            assert dkv_last is not None and want_dkv is not None
-            assert_equal(dkv_last[0].cpu(), want_dkv, print_no_mismatch=False)
+        assert_equal(
+            dq_last[0].cpu(), want_dq, test_case=test_case, print_no_mismatch=False
+        )
+        assert want_dkv is not None
+        assert_equal(
+            dkv_last[0].cpu(), want_dkv, test_case=test_case, print_no_mismatch=False
+        )
+
+    def test_bwd_fold_per_range_masks_match_reference(self):
+        masks = _BWD_PLAIN_FIXTURE[2]
+        self._check_plain_fold(
+            None,
+            masks,
+            torch.tensor(masks, dtype=torch.int32, device=self.device),
+            _fake_i32(cute.sym_int()),
+            "[fold][per_range]",
+        )
+
+    def test_bwd_fold_compile_time_full_matches_reference(self):
+        self._check_plain_fold(
+            MT_MAP.full,
+            [MT_MAP.full] * len(_BWD_PLAIN_FIXTURE[2]),
+            None,
+            None,
+            "[fold][full]",
+        )
+
+    def test_bwd_fold_compile_time_causal_matches_reference(self):
+        self._check_plain_fold(
+            MT_MAP.causal,
+            [MT_MAP.causal] * len(_BWD_PLAIN_FIXTURE[2]),
+            None,
+            None,
+            "[fold][causal]",
+        )
+
+    def test_bwd_dq_fold_range_merge_matches_reference(self):
+        test_case = "[fold][range_merge]"
+        q_list, k_list, masks, group_of = _BWD_MERGE_FIXTURE
+        num_groups = len(k_list)
+        counts = [0] * num_groups
+        for g in group_of:
+            counts[g] += 1
+        cu = [0]
+        for c in counts:
+            cu.append(cu[-1] + c)
+        cu_batches = torch.tensor(cu, dtype=torch.int32, device=self.device)
+        mask_t = torch.tensor(masks, dtype=torch.int32, device=self.device)
+        q_ranges = to_ranges_tensor(q_list, self.device)
+        k_ranges = to_ranges_tensor(k_list, self.device)
+        num_q_blocks = max(e for _, e in q_list) // _TILE_M + 2
+        num_k_blocks = max(e for _, e in k_list) // _CLUSTER_TILE_K + 2
+
+        sym = cute.sym_int
+        fn = cute.compile(
+            _FoldBwdHarness(_TILE_M, _CLUSTER_TILE_K, None, True),
+            _fake_i32(sym(), 2),
+            _fake_i32(sym(), 2),
+            _fake_i32(sym()),
+            _fake_i32(sym()),
+            _fake_i32(sym(), sym()),
+            None,
+            Int32(0),
+            Int32(0),
+            Int32(0),
+            Int32(0),
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+            options="--enable-tvm-ffi",
+        )
+        dq_last = torch.zeros(1, num_q_blocks, dtype=torch.int32, device=self.device)
+        fn(
+            q_ranges,
+            k_ranges,
+            mask_t,
+            cu_batches,
+            dq_last,
+            None,
+            0,
+            _FOLD_SPLIT,
+            _DQ_STRIDE,
+            _DKV_STRIDE,
+        )
+        fn(
+            q_ranges,
+            k_ranges,
+            mask_t,
+            cu_batches,
+            dq_last,
+            None,
+            _FOLD_SPLIT,
+            num_groups,
+            _DQ_STRIDE,
+            _DKV_STRIDE,
+        )
+        want_dq, _ = _ref_bwd_last(
+            q_list,
+            k_list,
+            masks,
+            group_of,
+            num_q_blocks,
+            num_k_blocks,
+            _TILE_M,
+            _CLUSTER_TILE_K,
+            _DQ_STRIDE,
+            _DKV_STRIDE,
+            range_merge=True,
+        )
+        assert_equal(
+            dq_last[0].cpu(), want_dq, test_case=test_case, print_no_mismatch=False
+        )
 
 
 if __name__ == "__main__":
