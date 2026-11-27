@@ -19,6 +19,7 @@ from typing import Optional
 from unittest import TestCase
 
 import cuda.bindings.driver as cuda
+import cutlass
 import cutlass.cute as cute
 import torch
 from cutlass import Int32
@@ -61,7 +62,7 @@ def _ref_m_bounds_per_range(
     return m_min, m_max
 
 
-def _ref_dq_pair_k_tile_end_on_block(
+def _ref_dq_pair_prev_k_tile_on_block(
     seqlen_q: int,
     seqlen_k: int,
     q_start: int,
@@ -71,11 +72,11 @@ def _ref_dq_pair_k_tile_end_on_block(
     attn: int,
 ) -> int:
     if seqlen_q <= 0 or seqlen_k <= 0:
-        return 0
+        return -1
     n_upper = math.ceil(seqlen_k / tile_n)
     b0 = q_start // tile_m
     mt_lo = block - b0 - 1 if (q_start % tile_m) != 0 and block > b0 else block - b0
-    k_tile_end = 0
+    prev_n = -1
     for mt in range(mt_lo, block - b0 + 1):
         if mt * tile_m >= seqlen_q:
             continue
@@ -84,8 +85,8 @@ def _ref_dq_pair_k_tile_end_on_block(
                 seqlen_q, seqlen_k, n, tile_m, tile_n, attn
             )
             if m_lo <= mt < m_hi:
-                k_tile_end = max(k_tile_end, n + 1)
-    return k_tile_end
+                prev_n = max(prev_n, n)
+    return prev_n
 
 
 def _ref_fwd_last(
@@ -114,9 +115,10 @@ def _ref_bwd_last(
     cluster_tile_k: int,
     dq_stride: int,
     dkv_stride: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    range_merge: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
     run_dq = torch.zeros(num_q_blocks, dtype=torch.int32)
-    run_dkv = torch.zeros(num_k_blocks, dtype=torch.int32)
+    run_dkv = None if range_merge else torch.zeros(num_k_blocks, dtype=torch.int32)
     for row, g in enumerate(group_of):
         qs, qe = q_list[row]
         ks, ke = k_list[g]
@@ -125,27 +127,28 @@ def _ref_bwd_last(
             continue
         attn = masks[row]
         for b in range(qs // tile_m, (qe - 1) // tile_m + 1):
-            k_tile_end = _ref_dq_pair_k_tile_end_on_block(
+            prev_n = _ref_dq_pair_prev_k_tile_on_block(
                 sq, sk, qs, b, tile_m, cluster_tile_k, attn
             )
-            if k_tile_end > 0:
-                run_dq[b] = max(int(run_dq[b]), g * dq_stride + k_tile_end)
-        kb0 = ks // cluster_tile_k
-        for kb in range(kb0, (ke - 1) // cluster_tile_k + 1):
-            active = False
-            if (ks % cluster_tile_k) != 0 and kb > kb0:
-                lo, hi = _ref_m_bounds_per_range(
-                    sq, sk, kb - kb0 - 1, tile_m, cluster_tile_k, attn
-                )
-                active = active or (lo < hi)
-            n_b = kb - kb0
-            if n_b * cluster_tile_k < sk:
-                lo, hi = _ref_m_bounds_per_range(
-                    sq, sk, n_b, tile_m, cluster_tile_k, attn
-                )
-                active = active or (lo < hi)
-            if active:
-                run_dkv[kb] = max(int(run_dkv[kb]), (g + 1) * dkv_stride)
+            if prev_n >= 0:
+                run_dq[b] = max(int(run_dq[b]), g * dq_stride + prev_n + 1)
+        if run_dkv is not None:
+            kb0 = ks // cluster_tile_k
+            for kb in range(kb0, (ke - 1) // cluster_tile_k + 1):
+                active = False
+                if (ks % cluster_tile_k) != 0 and kb > kb0:
+                    lo, hi = _ref_m_bounds_per_range(
+                        sq, sk, kb - kb0 - 1, tile_m, cluster_tile_k, attn
+                    )
+                    active = active or (lo < hi)
+                n_b = kb - kb0
+                if n_b * cluster_tile_k < sk:
+                    lo, hi = _ref_m_bounds_per_range(
+                        sq, sk, n_b, tile_m, cluster_tile_k, attn
+                    )
+                    active = active or (lo < hi)
+                if active:
+                    run_dkv[kb] = max(int(run_dkv[kb]), (g + 1) * dkv_stride)
     return run_dq, run_dkv
 
 
@@ -210,7 +213,7 @@ class _FoldBwdHarness:
         mMaskTypes: Optional[cute.Tensor],
         mCuBatches: Optional[cute.Tensor],
         mDQLast: cute.Tensor,
-        mDKVLast: cute.Tensor,
+        mDKVLast: Optional[cute.Tensor],
         range_from: Int32,
         range_to: Int32,
         dq_stride: Int32,
@@ -238,7 +241,7 @@ class _FoldBwdHarness:
         mMaskTypes: Optional[cute.Tensor],
         mCuBatches: Optional[cute.Tensor],
         mDQLast: cute.Tensor,
-        mDKVLast: cute.Tensor,
+        mDKVLast: Optional[cute.Tensor],
         range_from: Int32,
         range_to: Int32,
         dq_stride: Int32,
@@ -267,22 +270,22 @@ class _FoldBwdHarness:
             tidx,
             128,
         )
-        if tidx < cute.arch.WARP_SIZE:
-            range_write_index.fold_dkv_last(
-                block_info,
-                mQRanges,
-                mKRanges,
-                mMaskTypes,
-                mCuBatches,
-                mDKVLast,
-                Int32(0),
-                range_from,
-                range_to,
-                dkv_stride,
-                self.cluster_tile_k,
-                self.range_merge,
-                self.use_per_range_mask,
-            )
+        if cutlass.const_expr(not self.range_merge):
+            assert mDKVLast is not None
+            if tidx < cute.arch.WARP_SIZE:
+                range_write_index.fold_dkv_last(
+                    block_info,
+                    mQRanges,
+                    mKRanges,
+                    mMaskTypes,
+                    mDKVLast,
+                    Int32(0),
+                    range_from,
+                    range_to,
+                    dkv_stride,
+                    self.cluster_tile_k,
+                    self.use_per_range_mask,
+                )
 
 
 def _fake_i32(*shape):
@@ -410,7 +413,7 @@ class TestRangeWriteFold(TestCase):
             _fake_i32(sym()) if case.mask_type is None else None,
             _fake_i32(sym()) if case.range_merge else None,
             _fake_i32(sym(), sym()),
-            _fake_i32(sym(), sym()),
+            None if case.range_merge else _fake_i32(sym(), sym()),
             Int32(0),
             Int32(0),
             Int32(0),
@@ -419,7 +422,11 @@ class TestRangeWriteFold(TestCase):
             options="--enable-tvm-ffi",
         )
         dq_last = torch.zeros(1, num_q_blocks, dtype=torch.int32, device=self.device)
-        dkv_last = torch.zeros(1, num_k_blocks, dtype=torch.int32, device=self.device)
+        dkv_last = (
+            None
+            if case.range_merge
+            else torch.zeros(1, num_k_blocks, dtype=torch.int32, device=self.device)
+        )
         # Split at 7 so [0, 7) exercises delta < 32 (block-parallel) and
         # [7, num_groups) exercises delta >= 32 (range-parallel).
         mid = 7
@@ -458,9 +465,12 @@ class TestRangeWriteFold(TestCase):
             cluster_tile_k,
             dq_stride,
             dkv_stride,
+            range_merge=case.range_merge,
         )
         assert_equal(dq_last[0].cpu(), want_dq, print_no_mismatch=False)
-        assert_equal(dkv_last[0].cpu(), want_dkv, print_no_mismatch=False)
+        if not case.range_merge:
+            assert dkv_last is not None and want_dkv is not None
+            assert_equal(dkv_last[0].cpu(), want_dkv, print_no_mismatch=False)
 
 
 if __name__ == "__main__":

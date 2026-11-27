@@ -924,6 +924,9 @@ class FFABwdSm100:
         ) == self.range_dkv_write_order, (
             "the dK/dV write order comes with reduced dK/dV"
         )
+        assert not (
+            self.range_merge and self.range_dkv_write_order
+        ), "RangeMerge backward uses direct dK/dV stores without dK/dV write order"
         if const_expr(self.range_dq_write_order or self.range_dkv_write_order):
             assert (
                 self.gqa_fold.pack_factor == 1 and not self.is_local
@@ -6671,7 +6674,6 @@ class FFABwdSm100:
                         mQRanges,
                         mKRanges,
                         mMaskTypes,
-                        mCuBatches,
                         seqlen_info,
                         attn_type,
                         n_block // self.cta_group_size,
@@ -6683,7 +6685,6 @@ class FFABwdSm100:
                         self.tile_n * self.cta_group_size,
                         self.gqa_fold.covers_all_qheads,
                         self.gqa_fold.kv_group,
-                        self.range_merge,
                         self.use_per_range_mask,
                     )
                     self.compute_sync_barrier.arrive_and_wait()
@@ -6889,6 +6890,35 @@ class FFABwdSm100:
         return lock_value
 
     @cute.jit
+    def _range_merge_group_has_block_overlap(
+        self, mQRanges: cute.Tensor, pair_beg: Int32, pair_cnt: Int32
+    ) -> cutlass.Boolean:
+        all_inc = cutlass.Boolean(True)
+        all_dec = cutlass.Boolean(True)
+        seen_nonempty = cutlass.Boolean(False)
+        prev_b0 = Int32(0)
+        prev_b1 = Int32(0)
+        pj = Int32(0)
+        while pj < pair_cnt and (all_inc or all_dec):
+            row = pair_beg + pj
+            qs = mQRanges[row, 0]
+            qe = mQRanges[row, 1]
+            if qe > qs:
+                b0 = qs // self.tile_m
+                b1 = (qe - 1) // self.tile_m
+                if seen_nonempty:
+                    if b0 <= prev_b1:
+                        all_inc = cutlass.Boolean(False)
+                    if b1 >= prev_b0:
+                        all_dec = cutlass.Boolean(False)
+                else:
+                    seen_nonempty = cutlass.Boolean(True)
+                prev_b0 = b0
+                prev_b1 = b1
+            pj += 1
+        return not (all_inc or all_dec)
+
+    @cute.jit
     def dQacc_reduce(
         self,
         mdQacc: cute.Tensor,
@@ -7071,109 +7101,71 @@ class FFABwdSm100:
                     seqlen_info, n_block_cta_group
                 )
 
-            if const_expr(self.range_dq_write_order and not self.range_merge):
+            group_has_block_overlap = cutlass.Boolean(False)
+            if const_expr(self.range_dq_write_order):
                 assert (
                     dq_write_order is not None
                     and mQRanges is not None
                     and mKRanges is not None
                 )
-                if m_block_min < m_block_max and dq_folded < batch_idx:
-                    need_fold = n_block_cta_group == 0
-                    if not need_fold:
-                        n_min_last, _ = range_write_index.dq_pair_n_bounds(
-                            block_info,
-                            seqlen_info.seqlen_q,
-                            seqlen_info.seqlen_k,
-                            m_block_max - 1,
-                            attn_type,
-                            self.use_per_range_mask,
+                if const_expr(self.range_merge):
+                    assert mMaskTypes is not None
+                    if tidx == 0 and pair_cnt > 1:
+                        group_has_block_overlap = (
+                            self._range_merge_group_has_block_overlap(
+                                mQRanges, pair_beg, pair_cnt
+                            )
                         )
-                        need_fold = n_min_last == n_block_cta_group
-                    if need_fold:
-                        range_write_index.fold_dq_last(
-                            block_info,
-                            mQRanges,
-                            mKRanges,
-                            mMaskTypes,
-                            mCuBatches,
-                            dq_write_order.mLast,
-                            cute.arch.block_idx()[0],
-                            dq_folded,
-                            batch_idx,
-                            dq_write_order.writer_stride,
-                            self.tile_m,
-                            False,
-                            self.use_per_range_mask,
-                            tidx,
-                            num_reduce_threads,
-                        )
-                        self.reduce_sync_barrier.arrive_and_wait()
-                        dq_folded = batch_idx
-            elif const_expr(self.range_dq_write_order and self.range_merge):
-                assert (
-                    dq_write_order is not None
-                    and mQRanges is not None
-                    and mKRanges is not None
-                    and mMaskTypes is not None
-                )
-                group_has_block_overlap = cutlass.Boolean(False)
-                if tidx == 0 and pair_cnt > 1:
-                    all_inc = cutlass.Boolean(True)
-                    all_dec = cutlass.Boolean(True)
-                    seen_nonempty = cutlass.Boolean(False)
-                    prev_b0 = Int32(0)
-                    prev_b1 = Int32(0)
-                    pj_ov = Int32(0)
-                    while pj_ov < pair_cnt and (all_inc or all_dec):
-                        row_ov = pair_beg + pj_ov
-                        qs_ov = mQRanges[row_ov, 0]
-                        qe_ov = mQRanges[row_ov, 1]
-                        if qe_ov > qs_ov:
-                            b0_ov = qs_ov // self.tile_m
-                            b1_ov = (qe_ov - 1) // self.tile_m
-                            if seen_nonempty:
-                                if b0_ov <= prev_b1:
-                                    all_inc = cutlass.Boolean(False)
-                                if b1_ov >= prev_b0:
-                                    all_dec = cutlass.Boolean(False)
-                            else:
-                                seen_nonempty = cutlass.Boolean(True)
-                            prev_b0 = b0_ov
-                            prev_b1 = b1_ov
-                        pj_ov += 1
-                    group_has_block_overlap = not (all_inc or all_dec)
                 if dq_folded < batch_idx:
                     need_fold = cutlass.Boolean(False)
-                    pj_scan = Int32(0)
-                    while pj_scan < pair_cnt and not need_fold:
-                        row_scan = pair_beg + pj_scan
-                        seqlen_q_scan = mQRanges[row_scan, 1] - mQRanges[row_scan, 0]
-                        if seqlen_q_scan > 0:
-                            attn_scan = Int32(mMaskTypes[row_scan])
-                            (
-                                lo_s,
-                                hi_s,
-                            ) = block_info.get_m_block_min_max_per_range_seqlens(
-                                seqlen_q_scan,
-                                seqlen_info.seqlen_k,
-                                n_block_cta_group,
-                                attn_scan,
+                    if const_expr(self.range_merge):
+                        assert mMaskTypes is not None
+                        pj_scan = Int32(0)
+                        while pj_scan < pair_cnt and not need_fold:
+                            row_scan = pair_beg + pj_scan
+                            seqlen_q_scan = (
+                                mQRanges[row_scan, 1] - mQRanges[row_scan, 0]
                             )
-                            if hi_s > lo_s:
-                                if n_block_cta_group == 0:
-                                    need_fold = cutlass.Boolean(True)
-                                elif attn_scan != MT_MAP.full:
-                                    n_min_s, _ = range_write_index.dq_pair_n_bounds(
-                                        block_info,
-                                        seqlen_q_scan,
-                                        seqlen_info.seqlen_k,
-                                        hi_s - 1,
-                                        attn_scan,
-                                        True,
-                                    )
-                                    if n_min_s == n_block_cta_group:
+                            if seqlen_q_scan > 0:
+                                attn_scan = Int32(mMaskTypes[row_scan])
+                                (
+                                    lo_s,
+                                    hi_s,
+                                ) = block_info.get_m_block_min_max_per_range_seqlens(
+                                    seqlen_q_scan,
+                                    seqlen_info.seqlen_k,
+                                    n_block_cta_group,
+                                    attn_scan,
+                                )
+                                if hi_s > lo_s:
+                                    if n_block_cta_group == 0:
                                         need_fold = cutlass.Boolean(True)
-                        pj_scan += 1
+                                    elif attn_scan != MT_MAP.full:
+                                        n_min_s, _ = range_write_index.pair_n_bounds(
+                                            block_info,
+                                            seqlen_q_scan,
+                                            seqlen_info.seqlen_k,
+                                            hi_s - 1,
+                                            attn_scan,
+                                            True,
+                                        )
+                                        if n_min_s == n_block_cta_group:
+                                            need_fold = cutlass.Boolean(True)
+                            pj_scan += 1
+                    else:
+                        if m_block_min < m_block_max:
+                            if n_block_cta_group == 0:
+                                need_fold = cutlass.Boolean(True)
+                            else:
+                                n_min_last, _ = range_write_index.pair_n_bounds(
+                                    block_info,
+                                    seqlen_info.seqlen_q,
+                                    seqlen_info.seqlen_k,
+                                    m_block_max - 1,
+                                    attn_type,
+                                    self.use_per_range_mask,
+                                )
+                                need_fold = n_min_last == n_block_cta_group
                     if need_fold:
                         range_write_index.fold_dq_last(
                             block_info,
@@ -7187,7 +7179,7 @@ class FFABwdSm100:
                             batch_idx,
                             dq_write_order.writer_stride,
                             self.tile_m,
-                            True,
+                            self.range_merge,
                             self.use_per_range_mask,
                             tidx,
                             num_reduce_threads,
@@ -7688,7 +7680,7 @@ class FFABwdSm100:
                         if const_expr(self.range_dq_semaphore):
                             dq_sem_lock = Int32(0)
                             if n_block_cta_group > 0:
-                                n_min_m, _ = range_write_index.dq_pair_n_bounds(
+                                n_min_m, _ = range_write_index.pair_n_bounds(
                                     block_info,
                                     seqlen_info.seqlen_q,
                                     seqlen_info.seqlen_k,

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fold earlier writers into per-CTA state for deterministic range attention."""
-
 from typing import Optional
 
 import cutlass
@@ -51,7 +49,7 @@ def block_tiles(range_start: Int32, block: Int32, block_size: cutlass.Constexpr[
 
 
 @cute.jit
-def dq_pair_n_bounds(
+def pair_n_bounds(
     block_info: BlockInfo,
     seqlen_q: Int32,
     seqlen_k: Int32,
@@ -67,43 +65,19 @@ def dq_pair_n_bounds(
 
 
 @cute.jit
-def dq_pair_k_tile_end_on_block(
+def pair_m_bounds(
     block_info: BlockInfo,
     seqlen_q: Int32,
     seqlen_k: Int32,
-    q_start: Int32,
+    k_tile: Int32,
     attn_type: Int32,
-    block: Int32,
     use_per_range_mask: cutlass.Constexpr[bool],
-) -> Int32:
-    """1 + the largest K tile for which a pair writes dQ on physical Q
-    ``block``; 0 if none. ``block`` must overlap the Q range of the pair."""
-    k_tile_end = Int32(0)
-    if seqlen_q > 0 and seqlen_k > 0:
-        if const_expr(
-            not use_per_range_mask
-            and not block_info.is_causal
-            and not block_info.is_local
-        ):
-            k_tile_end = cute.ceil_div(seqlen_k, block_info.tile_n)
-        elif const_expr(use_per_range_mask) and attn_type == MT_MAP.full:
-            k_tile_end = cute.ceil_div(seqlen_k, block_info.tile_n)
-        else:
-            mt, mt_last = block_tiles(q_start, block, block_info.tile_m)
-            while mt <= mt_last:
-                if mt * block_info.tile_m < seqlen_q:
-                    n_lo, n_hi = dq_pair_n_bounds(
-                        block_info,
-                        seqlen_q,
-                        seqlen_k,
-                        mt,
-                        attn_type,
-                        use_per_range_mask,
-                    )
-                    if n_hi > n_lo:
-                        k_tile_end = cutlass.max(k_tile_end, n_hi)
-                mt += 1
-    return k_tile_end
+):
+    if const_expr(use_per_range_mask):
+        return block_info.get_m_block_min_max_per_range_seqlens(
+            seqlen_q, seqlen_k, k_tile, attn_type
+        )
+    return block_info.get_m_block_min_max_seqlens(seqlen_q, seqlen_k, k_tile)
 
 
 @cute.jit
@@ -120,27 +94,34 @@ def dq_pair_prev_k_tile_on_block(
     """Largest K tile ``< n_limit`` for which a pair writes dQ on physical Q
     ``block``; -1 if none. ``block`` must overlap the Q range of the pair."""
     prev_n = Int32(-1)
-    if const_expr(
-        not use_per_range_mask and not block_info.is_causal and not block_info.is_local
-    ):
-        prev_n = n_limit - 1
-    elif const_expr(use_per_range_mask) and attn_type == MT_MAP.full:
-        prev_n = n_limit - 1
-    else:
-        mt, mt_last = block_tiles(q_start, block, block_info.tile_m)
-        while mt <= mt_last:
-            if mt * block_info.tile_m < seqlen_q:
-                l_m, r_m = dq_pair_n_bounds(
-                    block_info,
-                    seqlen_q,
-                    seqlen_k,
-                    mt,
-                    attn_type,
-                    use_per_range_mask,
-                )
-                if r_m > l_m and l_m < n_limit:
-                    prev_n = cutlass.max(prev_n, cutlass.min(n_limit, r_m) - 1)
-            mt += 1
+    if seqlen_q > 0 and seqlen_k > 0 and n_limit > 0:
+        if const_expr(
+            not use_per_range_mask
+            and not block_info.is_causal
+            and not block_info.is_local
+        ):
+            prev_n = (
+                cutlass.min(n_limit, cute.ceil_div(seqlen_k, block_info.tile_n)) - 1
+            )
+        elif const_expr(use_per_range_mask) and attn_type == MT_MAP.full:
+            prev_n = (
+                cutlass.min(n_limit, cute.ceil_div(seqlen_k, block_info.tile_n)) - 1
+            )
+        else:
+            mt, mt_last = block_tiles(q_start, block, block_info.tile_m)
+            while mt <= mt_last:
+                if mt * block_info.tile_m < seqlen_q:
+                    l_m, r_m = pair_n_bounds(
+                        block_info,
+                        seqlen_q,
+                        seqlen_k,
+                        mt,
+                        attn_type,
+                        use_per_range_mask,
+                    )
+                    if r_m > l_m and l_m < n_limit:
+                        prev_n = cutlass.max(prev_n, cutlass.min(n_limit, r_m) - 1)
+                mt += 1
     return prev_n
 
 
@@ -157,20 +138,17 @@ def dkv_pair_k_tile_is_active(
     outside the K range is inactive."""
     active = cutlass.Boolean(False)
     if seqlen_q > 0 and k_tile >= 0 and k_tile * block_info.tile_n < seqlen_k:
-        if const_expr(use_per_range_mask):
-            if attn_type == MT_MAP.full:
-                active = cutlass.Boolean(True)
-            else:
-                m_lo, m_hi = block_info.get_m_block_min_max_per_range_seqlens(
-                    seqlen_q, seqlen_k, k_tile, attn_type
-                )
-                if m_lo < m_hi:
-                    active = cutlass.Boolean(True)
-        elif const_expr(not block_info.is_causal and not block_info.is_local):
+        if const_expr(
+            not use_per_range_mask
+            and not block_info.is_causal
+            and not block_info.is_local
+        ):
+            active = cutlass.Boolean(True)
+        elif const_expr(use_per_range_mask) and attn_type == MT_MAP.full:
             active = cutlass.Boolean(True)
         else:
-            m_lo, m_hi = block_info.get_m_block_min_max_seqlens(
-                seqlen_q, seqlen_k, k_tile
+            m_lo, m_hi = pair_m_bounds(
+                block_info, seqlen_q, seqlen_k, k_tile, attn_type, use_per_range_mask
             )
             if m_lo < m_hi:
                 active = cutlass.Boolean(True)
@@ -178,17 +156,16 @@ def dkv_pair_k_tile_is_active(
 
 
 @cute.jit
-def dkv_pair_is_active_on_block(
+def _dkv_block_is_active(
     block_info: BlockInfo,
     seqlen_q: Int32,
     seqlen_k: Int32,
     k_start: Int32,
     attn_type: Int32,
-    block: Int32,
+    kb: Int32,
     use_per_range_mask: cutlass.Constexpr[bool],
 ) -> cutlass.Boolean:
-    """Whether a pair has an active K tile that overlaps physical K ``block``."""
-    first, last = block_tiles(k_start, block, block_info.tile_n)
+    first, last = block_tiles(k_start, kb, block_info.tile_n)
     active = dkv_pair_k_tile_is_active(
         block_info, seqlen_q, seqlen_k, last, attn_type, use_per_range_mask
     )
@@ -197,94 +174,6 @@ def dkv_pair_is_active_on_block(
             block_info, seqlen_q, seqlen_k, first, attn_type, use_per_range_mask
         )
     return active
-
-
-@cute.jit
-def dkv_k_tile_is_active(
-    block_info: BlockInfo,
-    mQRanges: cute.Tensor,
-    mKRanges: cute.Tensor,
-    mMaskTypes: Optional[cute.Tensor],
-    mCuBatches: Optional[cute.Tensor],
-    r: Int32,
-    n_cta: Int32,
-    range_merge: cutlass.Constexpr[bool],
-    use_per_range_mask: cutlass.Constexpr[bool],
-) -> cutlass.Boolean:
-    seqlen_k = mKRanges[r, 1] - mKRanges[r, 0]
-    active = cutlass.Boolean(False)
-    if const_expr(range_merge):
-        assert mMaskTypes is not None and mCuBatches is not None
-        if n_cta >= 0 and n_cta * block_info.tile_n < seqlen_k:
-            row = Int32(mCuBatches[r])
-            row_end = Int32(mCuBatches[r + 1])
-            while row < row_end and not active:
-                active = dkv_pair_k_tile_is_active(
-                    block_info,
-                    mQRanges[row, 1] - mQRanges[row, 0],
-                    seqlen_k,
-                    n_cta,
-                    Int32(mMaskTypes[row]),
-                    True,
-                )
-                row += 1
-    else:
-        attn_r = Int32(MT_MAP.full)
-        if const_expr(use_per_range_mask):
-            assert mMaskTypes is not None
-            attn_r = Int32(mMaskTypes[r])
-        active = dkv_pair_k_tile_is_active(
-            block_info,
-            mQRanges[r, 1] - mQRanges[r, 0],
-            seqlen_k,
-            n_cta,
-            attn_r,
-            use_per_range_mask,
-        )
-    return active
-
-
-@cute.jit
-def _dkv_block_writer(
-    block_info: BlockInfo,
-    mQRanges: cute.Tensor,
-    mKRanges: cute.Tensor,
-    mMaskTypes: Optional[cute.Tensor],
-    mCuBatches: Optional[cute.Tensor],
-    writer_stride: Int32,
-    r: Int32,
-    kb: Int32,
-    range_merge: cutlass.Constexpr[bool],
-    use_per_range_mask: cutlass.Constexpr[bool],
-) -> Int32:
-    first, last = block_tiles(mKRanges[r, 0], kb, block_info.tile_n)
-    active = dkv_k_tile_is_active(
-        block_info,
-        mQRanges,
-        mKRanges,
-        mMaskTypes,
-        mCuBatches,
-        r,
-        last,
-        range_merge,
-        use_per_range_mask,
-    )
-    if not active and first != last:
-        active = dkv_k_tile_is_active(
-            block_info,
-            mQRanges,
-            mKRanges,
-            mMaskTypes,
-            mCuBatches,
-            r,
-            first,
-            range_merge,
-            use_per_range_mask,
-        )
-    writer = Int32(0)
-    if active:
-        writer = (r + 1) * writer_stride
-    return writer
 
 
 @cute.jit
@@ -370,6 +259,7 @@ def fold_dq_last(
     while r < range_to:
         seqlen_k = mKRanges[r, 1] - mKRanges[r, 0]
         if seqlen_k > 0:
+            k_tiles = cute.ceil_div(seqlen_k, block_info.tile_n)
             if const_expr(range_merge):
                 assert mCuBatches is not None
                 row = Int32(mCuBatches[r])
@@ -389,17 +279,18 @@ def fold_dq_last(
                     b = q_s // tile_m + b_offset
                     last_b = (q_e - 1) // tile_m
                     while b <= last_b:
-                        k_tile_end = dq_pair_k_tile_end_on_block(
+                        prev_n = dq_pair_prev_k_tile_on_block(
                             block_info,
                             seqlen_q,
                             seqlen_k,
                             q_s,
                             attn_r,
                             b,
+                            k_tiles,
                             use_per_range_mask,
                         )
-                        if k_tile_end > 0:
-                            writer = r * writer_stride + k_tile_end
+                        if prev_n >= 0:
+                            writer = r * writer_stride + prev_n + 1
                             red_max_relaxed_cta(elem_pointer(mLast, (slot, b)), writer)
                         b += b_stride
                 row += 1
@@ -413,14 +304,12 @@ def fold_dkv_last(
     mQRanges: cute.Tensor,
     mKRanges: cute.Tensor,
     mMaskTypes: Optional[cute.Tensor],
-    mCuBatches: Optional[cute.Tensor],
     mLast: cute.Tensor,
     slot: Int32,
     range_from: Int32,
     range_to: Int32,
     writer_stride: Int32,
     block_rows: cutlass.Constexpr[int],
-    range_merge: cutlass.Constexpr[bool],
     use_per_range_mask: cutlass.Constexpr[bool],
 ) -> None:
     """Fold backward dK/dV writers of ``[range_from, range_to)`` into
@@ -431,81 +320,39 @@ def fold_dkv_last(
         k_s = mKRanges[r, 0]
         k_e = mKRanges[r, 1]
         seqlen_k = k_e - k_s
-        if seqlen_k > 0:
+        seqlen_q = mQRanges[r, 1] - mQRanges[r, 0]
+        if seqlen_k > 0 and seqlen_q > 0:
             writer = (r + 1) * writer_stride
             kb = k_s // block_rows
             last_kb = (k_e - 1) // block_rows
-            if const_expr(range_merge):
-                assert mMaskTypes is not None and mCuBatches is not None
-                row_beg = Int32(mCuBatches[r])
-                row_end = Int32(mCuBatches[r + 1])
-                all_k_active = cutlass.Boolean(False)
-                row = row_beg
-                while row < row_end and not all_k_active:
-                    seqlen_q = mQRanges[row, 1] - mQRanges[row, 0]
-                    if seqlen_q > 0:
-                        attn_r = Int32(mMaskTypes[row])
-                        # Only bi_causal with seqlen_q > seqlen_k leaves a K tile
-                        # without an unmasked Q tile.
-                        if attn_r != MT_MAP.bi_causal or seqlen_q <= seqlen_k:
-                            all_k_active = cutlass.Boolean(True)
-                    row += 1
-                if all_k_active:
-                    while kb <= last_kb:
-                        red_max_relaxed_cta(elem_pointer(mLast, (slot, kb)), writer)
-                        kb += 1
-                else:
-                    while kb <= last_kb:
-                        w = _dkv_block_writer(
-                            block_info,
-                            mQRanges,
-                            mKRanges,
-                            mMaskTypes,
-                            mCuBatches,
-                            writer_stride,
-                            r,
-                            kb,
-                            True,
-                            use_per_range_mask,
-                        )
-                        if w > 0:
-                            red_max_relaxed_cta(elem_pointer(mLast, (slot, kb)), w)
-                        kb += 1
+            attn_r = Int32(MT_MAP.full)
+            if const_expr(use_per_range_mask):
+                assert mMaskTypes is not None
+                attn_r = Int32(mMaskTypes[r])
+            if const_expr(
+                not use_per_range_mask
+                and not block_info.is_causal
+                and not block_info.is_local
+            ) or (
+                const_expr(use_per_range_mask)
+                and (attn_r != MT_MAP.bi_causal or seqlen_q <= seqlen_k)
+            ):
+                while kb <= last_kb:
+                    red_max_relaxed_cta(elem_pointer(mLast, (slot, kb)), writer)
+                    kb += 1
             else:
-                seqlen_q = mQRanges[r, 1] - mQRanges[r, 0]
-                if seqlen_q > 0:
-                    attn_r = Int32(MT_MAP.full)
-                    if const_expr(use_per_range_mask):
-                        assert mMaskTypes is not None
-                        attn_r = Int32(mMaskTypes[r])
-                    if const_expr(
-                        not use_per_range_mask
-                        and not block_info.is_causal
-                        and not block_info.is_local
-                    ) or (
-                        const_expr(use_per_range_mask)
-                        and (attn_r != MT_MAP.bi_causal or seqlen_q <= seqlen_k)
+                while kb <= last_kb:
+                    if _dkv_block_is_active(
+                        block_info,
+                        seqlen_q,
+                        seqlen_k,
+                        k_s,
+                        attn_r,
+                        kb,
+                        use_per_range_mask,
                     ):
-                        while kb <= last_kb:
-                            red_max_relaxed_cta(elem_pointer(mLast, (slot, kb)), writer)
-                            kb += 1
-                    else:
-                        while kb <= last_kb:
-                            w = _dkv_block_writer(
-                                block_info,
-                                mQRanges,
-                                mKRanges,
-                                mMaskTypes,
-                                mCuBatches,
-                                writer_stride,
-                                r,
-                                kb,
-                                False,
-                                use_per_range_mask,
-                            )
-                            if w > 0:
-                                red_max_relaxed_cta(elem_pointer(mLast, (slot, kb)), w)
-                            kb += 1
+                        red_max_relaxed_cta(elem_pointer(mLast, (slot, kb)), writer)
+                    kb += 1
         r += cute.arch.WARP_SIZE
     cute.arch.fence_acq_rel_cta()
     cute.arch.sync_warp()

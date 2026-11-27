@@ -116,14 +116,6 @@ def _apply_range_merge(
                 torch.int32,
                 outer_ranges.device,
             )
-        if plan.row_group is not None:
-            validate_tensor(
-                plan.row_group,
-                "RangeMergePlan.row_group",
-                (outer_ranges.shape[0],),
-                torch.int32,
-                outer_ranges.device,
-            )
         return plan
     return merge_qk_ranges(
         outer_ranges,
@@ -203,7 +195,9 @@ def _flex_flash_attn_fwd(
         sink: optional ``[n_sink, num_head]`` sink logits (``"sh"`` layout only).
         pack_gqa: fold the q heads of one kv head into the M dimension, so one
             CTA serves ``(token, q_head)`` rows of a kv head. ``None`` enables
-            it for GQA when ``tile_m % (num_head // num_head_kv) == 0`` (opt-in on range atomic-merge).
+            it for GQA on the direct-store paths when
+            ``tile_m % (num_head // num_head_kv) == 0``; on the range
+            atomic-merge path it is opt-in and requires that multiple.
             SM80 and ``range_merge`` always run unpacked, including with
             ``pack_gqa=True``.
         out_dtype: GMEM O dtype, one of fp32/fp16/bf16. ``None`` takes the dtype
@@ -498,6 +492,8 @@ def _flex_flash_attn_fwd(
             intra_wg_overlap = fwd_cfg.intra_wg_overlap
 
     if pack_gqa is None:
+        # Pack direct-store GQA only when every q tile starts on a token
+        # boundary; unaligned tiles lose TMA Q loads and O stores.
         pack_gqa = (
             qhead_per_kvhead > 1
             and disable_fwd_atomic_reduction
@@ -1348,7 +1344,11 @@ def _flex_flash_attn_bwd(
     direct_dq_init = (
         disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
     )
+    # Without the in-kernel K-merge the kernels see the caller's sorted, disjoint
+    # q_ranges; the K-merge repeats a q range once per K group.
     q_ranges_disjoint = direct_dq_init and not range_merge_active
+    # Packed tiles reduce dQ through the token-space row-major dQacc, whose
+    # TMA box splits rows into (pack_factor, tokens).
     use_dense_dqacc_for_ranges = (
         q_ranges_disjoint and head_dim % 32 == 0 and gqa_fold.pack_factor == 1
     )
@@ -1483,6 +1483,7 @@ def _flex_flash_attn_bwd(
         return dq, dk, dv, dsink
 
     if direct_dkv and not declared_k_full_coverage:
+        # Hole cleanup binary-searches sorted starts; merged K groups are launch-ordered.
         hole_k_ranges = (
             k_ranges if k_merge is None else k_merge.merged_outer_ranges_by_start
         )
@@ -2409,12 +2410,14 @@ def flex_flash_attn_func(
         An enabled cap cannot be combined with a user ``score_mod``.
 
     pack_gqa: fold the q heads of one kv head into the M dimension of the
-        forward. ``None`` packs GQA when the q-tile size (128) is a multiple
-        of ``nheads_q // nheads_kv``, except on the SM100/SM110 range
-        atomic-merge path, where packing is opt-in and requires that multiple.
-        SM80 and ``range_merge`` always run unpacked, including with
-        ``pack_gqa=True``. The backward does not read it; ``bwd_pack_factor``
-        sets the backward packing.
+        forward. ``None`` packs GQA on the direct-store paths when the q-tile
+        size (128) is a multiple of ``nheads_q // nheads_kv``; a tile that
+        starts inside a token loses the TMA Q load and O store and runs slower
+        than unpacked, so ``None`` leaves such groups unpacked and ``True``
+        still packs them. The SM100/SM110 range atomic-merge path packs only
+        on request and requires that multiple. SM80 and ``range_merge`` always
+        run unpacked, including with ``pack_gqa=True``. The backward does not
+        read it; ``bwd_pack_factor`` sets the backward packing.
 
     disable_fwd_atomic_reduction: caller contract that q_ranges are sorted
         and pairwise disjoint, giving every O and dQ row a unique writer.
@@ -2438,7 +2441,9 @@ def flex_flash_attn_func(
         relations sharing an outer interval into (group, pair) CSR form so
         forward skips the atomic O merge; backward derives the dual K-merge.
         SM100/SM110 only; requires both ``disable_*_atomic_reduction``
-        contracts.
+        contracts. ``True`` builds the merge tables on device in every call
+        without host synchronization (CUDA-graph capturable); pass a
+        precomputed plan to reuse the tables across calls.
 
     out_dtype: dtype of the returned O, fp32/fp16/bf16. None returns the input
         dtype. A dtype other than the input dtype requires SM100/SM110. With

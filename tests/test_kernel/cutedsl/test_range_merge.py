@@ -212,17 +212,6 @@ class TestRangeMergePlan(TestCase):
         self.assertEqual(tuple(plan.cu_batches.shape), (num_rows + 1,))
         self.assertEqual(tuple(plan.merged_outer_ranges_by_start.shape), (num_rows, 2))
         self.assertTrue(bool((plan.merged_outer_ranges[num_groups:] == 0).all()))
-        self.assertIsNotNone(plan.row_group)
-        assert plan.row_group is not None
-        self.assertEqual(tuple(plan.row_group.shape), (num_rows,))
-        self.assertEqual(plan.row_group.dtype, torch.int32)
-        cu_list = plan.cu_batches.tolist()
-        rg_list = plan.row_group.tolist()
-        for g in range(num_groups):
-            self.assertEqual(
-                rg_list[cu_list[g] : cu_list[g + 1]],
-                [g] * (cu_list[g + 1] - cu_list[g]),
-            )
         return _plan_groups(
             plan.merged_outer_ranges,
             plan.sorted_inner_ranges,
@@ -275,9 +264,6 @@ class TestRangeMergePlan(TestCase):
         self.assertIsNotNone(plan.unique_count)
         assert plan.unique_count is not None
         self.assertEqual(int(plan.unique_count.item()), 0)
-        self.assertIsNotNone(plan.row_group)
-        assert plan.row_group is not None
-        self.assertEqual(tuple(plan.row_group.shape), (0,))
 
     def test_merge_runs_without_host_sync(self):
         device = torch.cuda.current_device()
