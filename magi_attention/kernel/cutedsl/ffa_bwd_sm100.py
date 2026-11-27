@@ -34,7 +34,7 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
-from . import range_write_index, range_write_order, sm100_utils
+from . import range_last_writer, range_write_order, sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
@@ -826,7 +826,9 @@ class FFABwdSm100:
         mCuBatches: Optional[cute.Tensor] = None,
         mNumBatches: Optional[cute.Tensor] = None,
         max_seqlen_k: Int32 | None = None,
-        sm_margin: Int32 | None = None,
+        # CTA cap of the persistent range grid: the SM count of the launch
+        # device minus the SM reservation.
+        max_grid_ctas: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
         mTileCounter: Optional[cute.Tensor] = None,
         # tanh cap magnitude; required iff has_softcap.
@@ -1414,7 +1416,7 @@ class FFABwdSm100:
             qhead_per_kvhead_packgqa=1,
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
-            sm_margin=sm_margin,
+            max_grid_ctas=max_grid_ctas,
             # Range write orders require monotonic (relation, head, K-tile) launch order.
             lpt=self.spt,
             head_swizzle=self.dense_deterministic,
@@ -1818,9 +1820,7 @@ class FFABwdSm100:
                 range_write_order.WriteOrderTensors(
                     mdKVWriteOrder,
                     mdKVLast,
-                    Int32(
-                        1 if self.gqa_fold.covers_all_qheads else self.gqa_fold.kv_group
-                    ),
+                    Int32(self.gqa_fold.dkv_writer_stride),
                 )
                 if const_expr(self.range_dkv_write_order)
                 else None
@@ -6751,23 +6751,16 @@ class FFABwdSm100:
                     if tidx == 0:
                         assert dkv_write_order is not None
                         cute.arch.fence_acq_rel_gpu()
-                        range_write_order.arrive(
+                        range_write_order.arrive_blocks(
                             dkv_write_order.mWriteOrder,
                             dkv_left,
+                            dkv_right,
                             head_kv,
                             dkv_writer,
                             dkv_left_weight,
+                            dkv_right_weight,
                             self.cta_group_size,
                         )
-                        if dkv_right != dkv_left:
-                            range_write_order.arrive(
-                                dkv_write_order.mWriteOrder,
-                                dkv_right,
-                                head_kv,
-                                dkv_writer,
-                                dkv_right_weight,
-                                self.cta_group_size,
-                            )
 
             # Zero dK/dV when no Q tile contributes to this KV tile; the
             # accumulating postprocess path leaves untouched rows at zero.
@@ -6917,6 +6910,60 @@ class FFABwdSm100:
                 prev_b1 = b1
             pj += 1
         return not (all_inc or all_dec)
+
+    def _dq_store_wait_read(
+        self, read_flag: bool, stage: int, n_reduce_stages: int
+    ) -> bool:
+        """``read`` argument of the bulk wait that follows reduce stage ``stage``
+        of an M tile.
+
+        The dQ write order arrives once the reductions of an M tile reached
+        dQacc. With one sdQacc stage every bulk wait retires the only pending
+        store, so the last stage waits for the destination writes and the tile
+        needs no separate drain.
+        """
+        return read_flag and not (
+            self.range_dq_write_order
+            and self.sdQacc_stage == 1
+            and stage == n_reduce_stages - 1
+        )
+
+    @cute.jit
+    def _dq_write_order_arrive(
+        self,
+        dq_write_order: range_write_order.WriteOrderTensors,
+        dq_writer: Int32,
+        left: Int32,
+        right: Int32,
+        left_weight: Int32,
+        right_weight: Int32,
+        q_head: Int32,
+        tidx: Int32,
+        is_tma_warp: cutlass.Boolean,
+    ) -> None:
+        """Arrive on the dQ blocks of one M tile once its reductions reached dQacc.
+
+        ``read=False`` waits for the writes at the destination. With one
+        sdQacc stage the last reduce stage of the tile already waited that way
+        (``_dq_store_wait_read``).
+        """
+        if const_expr(self.sdQacc_stage > 1):
+            if is_tma_warp:
+                cute.arch.cp_async_bulk_wait_group(0, read=False)
+            self.reduce_sync_barrier.arrive_and_wait()
+        if tidx == 0:
+            if left_weight > 0 or right_weight > 0:
+                cute.arch.fence_acq_rel_gpu()
+                range_write_order.arrive_blocks(
+                    dq_write_order.mWriteOrder,
+                    left,
+                    right,
+                    q_head,
+                    dq_writer,
+                    left_weight,
+                    right_weight,
+                    self.cta_group_size,
+                )
 
     @cute.jit
     def dQacc_reduce(
@@ -7079,8 +7126,8 @@ class FFABwdSm100:
             if const_expr(self.range_dq_write_order):
                 assert dq_write_order is not None and mQRanges is not None
                 assert mKRanges is not None
-                dq_writer = (
-                    batch_idx * dq_write_order.writer_stride + n_block_cta_group + 1
+                dq_writer = range_last_writer.writer_number(
+                    batch_idx, dq_write_order.writer_stride, n_block_cta_group
                 )
             if const_expr(self.range_merge):
                 assert mMaskTypes is not None and mCuBatches is not None
@@ -7117,64 +7164,37 @@ class FFABwdSm100:
                             )
                         )
                 if dq_folded < batch_idx:
-                    need_fold = cutlass.Boolean(False)
                     if const_expr(self.range_merge):
                         assert mMaskTypes is not None
-                        pj_scan = Int32(0)
-                        while pj_scan < pair_cnt and not need_fold:
-                            row_scan = pair_beg + pj_scan
-                            seqlen_q_scan = (
-                                mQRanges[row_scan, 1] - mQRanges[row_scan, 0]
-                            )
-                            if seqlen_q_scan > 0:
-                                attn_scan = Int32(mMaskTypes[row_scan])
-                                (
-                                    lo_s,
-                                    hi_s,
-                                ) = block_info.get_m_block_min_max_per_range_seqlens(
-                                    seqlen_q_scan,
-                                    seqlen_info.seqlen_k,
-                                    n_block_cta_group,
-                                    attn_scan,
-                                )
-                                if hi_s > lo_s:
-                                    if n_block_cta_group == 0:
-                                        need_fold = cutlass.Boolean(True)
-                                    elif attn_scan != MT_MAP.full:
-                                        n_min_s, _ = range_write_index.pair_n_bounds(
-                                            block_info,
-                                            seqlen_q_scan,
-                                            seqlen_info.seqlen_k,
-                                            hi_s - 1,
-                                            attn_scan,
-                                            True,
-                                        )
-                                        if n_min_s == n_block_cta_group:
-                                            need_fold = cutlass.Boolean(True)
-                            pj_scan += 1
+                        need_fold = range_write_order.dq_group_needs_last(
+                            block_info,
+                            mQRanges,
+                            mMaskTypes,
+                            pair_beg,
+                            pair_beg + pair_cnt,
+                            seqlen_info.seqlen_k,
+                            n_block_cta_group,
+                        )
                     else:
-                        if m_block_min < m_block_max:
-                            if n_block_cta_group == 0:
-                                need_fold = cutlass.Boolean(True)
-                            else:
-                                n_min_last, _ = range_write_index.pair_n_bounds(
-                                    block_info,
-                                    seqlen_info.seqlen_q,
-                                    seqlen_info.seqlen_k,
-                                    m_block_max - 1,
-                                    attn_type,
-                                    self.use_per_range_mask,
-                                )
-                                need_fold = n_min_last == n_block_cta_group
+                        need_fold = range_write_order.dq_pair_needs_last(
+                            block_info,
+                            seqlen_info.seqlen_q,
+                            seqlen_info.seqlen_k,
+                            n_block_cta_group,
+                            m_block_min,
+                            m_block_max,
+                            attn_type,
+                            self.use_per_range_mask,
+                        )
                     if need_fold:
-                        range_write_index.fold_dq_last(
+                        range_last_writer.fold_dq_last(
                             block_info,
                             mQRanges,
                             mKRanges,
                             mMaskTypes,
                             mCuBatches,
                             dq_write_order.mLast,
-                            cute.arch.block_idx()[0],
+                            range_last_writer.cta_slot(),
                             dq_folded,
                             batch_idx,
                             dq_write_order.writer_stride,
@@ -7467,39 +7487,33 @@ class FFABwdSm100:
                         for it in cutlass.range(hi_p - lo_p, unroll=1):
                             m_block = lo_p + it
                             if const_expr(self.range_dq_write_order):
-                                dq_left = Int32(0)
-                                dq_right = Int32(0)
-                                dq_wait_left = Int32(-1)
-                                dq_wait_right = Int32(-1)
-                                dq_arrive_left = cutlass.Boolean(False)
-                                dq_arrive_right = cutlass.Boolean(False)
-                                if tidx == 0:
-                                    (
-                                        dq_left,
-                                        dq_right,
-                                        dq_wait_left,
-                                        dq_wait_right,
-                                        dq_arrive_left,
-                                        dq_arrive_right,
-                                    ) = range_write_order.dq_plan(
-                                        dq_write_order,
-                                        block_info,
-                                        batch_idx,
-                                        n_block_cta_group,
-                                        seqlen_pair,
-                                        attn_type_pair,
-                                        m_block,
-                                        lo_p,
-                                        hi_p,
-                                        mQRanges=mQRanges,
-                                        tile_m=self.tile_m,
-                                        range_merge=True,
-                                        use_per_range_mask=self.use_per_range_mask,
-                                        mMaskTypes=mMaskTypes,
-                                        group_pairs=group_pairs,
-                                        seqlen_k_group=seqlen_info.seqlen_k,
-                                        group_has_block_overlap=group_has_block_overlap,
-                                    )
+                                (
+                                    dq_left,
+                                    dq_right,
+                                    dq_wait_left,
+                                    dq_wait_right,
+                                    dq_left_weight,
+                                    dq_right_weight,
+                                ) = range_write_order.dq_plan(
+                                    dq_write_order,
+                                    block_info,
+                                    batch_idx,
+                                    n_block_cta_group,
+                                    seqlen_pair,
+                                    attn_type_pair,
+                                    m_block,
+                                    lo_p,
+                                    hi_p,
+                                    mQRanges=mQRanges,
+                                    is_waiter=tidx == 0,
+                                    tile_m=self.tile_m,
+                                    range_merge=True,
+                                    use_per_range_mask=self.use_per_range_mask,
+                                    mMaskTypes=mMaskTypes,
+                                    group_pairs=group_pairs,
+                                    seqlen_k_group=seqlen_info.seqlen_k,
+                                    group_has_block_overlap=group_has_block_overlap,
+                                )
 
                             # Wait for tdQ(i) to be full
                             pipeline_dQ.consumer_wait(dQ_consumer_state)
@@ -7522,11 +7536,8 @@ class FFABwdSm100:
                             n_reduce_stages = const_expr(cute.size(tdQrdQ, mode=[1]))
                             for stage in cutlass.range_constexpr(n_reduce_stages):
                                 store_read = const_expr(
-                                    read_flag
-                                    and not (
-                                        self.range_dq_write_order
-                                        and self.sdQacc_stage == 1
-                                        and stage == n_reduce_stages - 1
+                                    self._dq_store_wait_read(
+                                        read_flag, stage, n_reduce_stages
                                     )
                                 )
                                 smem_idx = dQ_tma_store_producer_state.index
@@ -7565,13 +7576,14 @@ class FFABwdSm100:
 
                                 if const_expr(self.range_dq_write_order and stage == 0):
                                     if tidx == 0:
-                                        range_write_order.dq_wait_planned(
-                                            dq_write_order,
+                                        assert dq_write_order is not None
+                                        range_write_order.wait_published_blocks(
+                                            dq_write_order.mWriteOrder,
                                             dq_left,
                                             dq_right,
+                                            scratch_head,
                                             dq_wait_left,
                                             dq_wait_right,
-                                            scratch_head,
                                         )
                                 # Placed after TMEM consumer_release so peer sync does not block dQ MMA.
                                 if const_expr(self.dq_pair_handoff and stage == 0):
@@ -7636,23 +7648,17 @@ class FFABwdSm100:
                                 dQ_tma_store_producer_state.advance()
 
                             if const_expr(self.range_dq_write_order):
-                                if const_expr(self.sdQacc_stage > 1):
-                                    if is_tma_warp:
-                                        cute.arch.cp_async_bulk_wait_group(
-                                            0, read=False
-                                        )
-                                    self.reduce_sync_barrier.arrive_and_wait()
-                                if tidx == 0:
-                                    range_write_order.dq_arrive_planned(
-                                        dq_write_order,
-                                        dq_writer,
-                                        dq_left,
-                                        dq_right,
-                                        dq_arrive_left,
-                                        dq_arrive_right,
-                                        scratch_head,
-                                        self.cta_group_size,
-                                    )
+                                self._dq_write_order_arrive(
+                                    dq_write_order,
+                                    dq_writer,
+                                    dq_left,
+                                    dq_right,
+                                    dq_left_weight,
+                                    dq_right_weight,
+                                    scratch_head,
+                                    tidx,
+                                    is_tma_warp,
+                                )
 
                         if const_expr(self.dq_pair_handoff):
                             assert pair_handoff is not None
@@ -7680,7 +7686,7 @@ class FFABwdSm100:
                         if const_expr(self.range_dq_semaphore):
                             dq_sem_lock = Int32(0)
                             if n_block_cta_group > 0:
-                                n_min_m, _ = range_write_index.pair_n_bounds(
+                                n_min_m, _ = range_last_writer.pair_n_bounds(
                                     block_info,
                                     seqlen_info.seqlen_q,
                                     seqlen_info.seqlen_k,
@@ -7690,36 +7696,30 @@ class FFABwdSm100:
                                 )
                                 dq_sem_lock = n_block_cta_group - n_min_m
                         if const_expr(self.range_dq_write_order):
-                            dq_left = Int32(0)
-                            dq_right = Int32(0)
-                            dq_wait_left = Int32(-1)
-                            dq_wait_right = Int32(-1)
-                            dq_arrive_left = cutlass.Boolean(False)
-                            dq_arrive_right = cutlass.Boolean(False)
-                            if tidx == 0:
-                                (
-                                    dq_left,
-                                    dq_right,
-                                    dq_wait_left,
-                                    dq_wait_right,
-                                    dq_arrive_left,
-                                    dq_arrive_right,
-                                ) = range_write_order.dq_plan(
-                                    dq_write_order,
-                                    block_info,
-                                    batch_idx,
-                                    n_block_cta_group,
-                                    seqlen_info,
-                                    attn_type,
-                                    m_block,
-                                    m_block_min,
-                                    m_block_max,
-                                    mQRanges=mQRanges,
-                                    tile_m=self.tile_m,
-                                    range_merge=False,
-                                    use_per_range_mask=self.use_per_range_mask,
-                                    mMaskTypes=mMaskTypes,
-                                )
+                            (
+                                dq_left,
+                                dq_right,
+                                dq_wait_left,
+                                dq_wait_right,
+                                dq_left_weight,
+                                dq_right_weight,
+                            ) = range_write_order.dq_plan(
+                                dq_write_order,
+                                block_info,
+                                batch_idx,
+                                n_block_cta_group,
+                                seqlen_info,
+                                attn_type,
+                                m_block,
+                                m_block_min,
+                                m_block_max,
+                                mQRanges=mQRanges,
+                                is_waiter=tidx == 0,
+                                tile_m=self.tile_m,
+                                range_merge=False,
+                                use_per_range_mask=self.use_per_range_mask,
+                                mMaskTypes=mMaskTypes,
+                            )
 
                         # Wait for tdQ(i) to be full
                         pipeline_dQ.consumer_wait(dQ_consumer_state)
@@ -7744,11 +7744,8 @@ class FFABwdSm100:
                         n_reduce_stages = const_expr(cute.size(tdQrdQ, mode=[1]))
                         for stage in cutlass.range_constexpr(n_reduce_stages):
                             store_read = const_expr(
-                                read_flag
-                                and not (
-                                    self.range_dq_write_order
-                                    and self.sdQacc_stage == 1
-                                    and stage == n_reduce_stages - 1
+                                self._dq_store_wait_read(
+                                    read_flag, stage, n_reduce_stages
                                 )
                             )
                             # R2S copy dQacc (bulk path)
@@ -7833,13 +7830,14 @@ class FFABwdSm100:
                                 )
                             if const_expr(self.range_dq_write_order and stage == 0):
                                 if tidx == 0:
-                                    range_write_order.dq_wait_planned(
-                                        dq_write_order,
+                                    assert dq_write_order is not None
+                                    range_write_order.wait_published_blocks(
+                                        dq_write_order.mWriteOrder,
                                         dq_left,
                                         dq_right,
+                                        scratch_head,
                                         dq_wait_left,
                                         dq_wait_right,
-                                        scratch_head,
                                     )
 
                             # Sync before S2G copy
@@ -7985,21 +7983,17 @@ class FFABwdSm100:
                                 )
 
                         if const_expr(self.range_dq_write_order):
-                            if const_expr(self.sdQacc_stage > 1):
-                                if is_tma_warp:
-                                    cute.arch.cp_async_bulk_wait_group(0, read=False)
-                                self.reduce_sync_barrier.arrive_and_wait()
-                            if tidx == 0:
-                                range_write_order.dq_arrive_planned(
-                                    dq_write_order,
-                                    dq_writer,
-                                    dq_left,
-                                    dq_right,
-                                    dq_arrive_left,
-                                    dq_arrive_right,
-                                    scratch_head,
-                                    self.cta_group_size,
-                                )
+                            self._dq_write_order_arrive(
+                                dq_write_order,
+                                dq_writer,
+                                dq_left,
+                                dq_right,
+                                dq_left_weight,
+                                dq_right_weight,
+                                scratch_head,
+                                tidx,
+                                is_tma_warp,
+                            )
 
                 if process_tile:
                     # The write order path fully drains every m tile before its arrive.

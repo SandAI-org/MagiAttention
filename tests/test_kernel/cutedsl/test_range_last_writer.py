@@ -25,7 +25,7 @@ from cutlass import Int32
 from quack.compile_utils import make_fake_tensor as fake_tensor
 from torch.testing._internal.common_utils import run_tests
 
-from magi_attention.kernel.cutedsl import range_write_index
+from magi_attention.kernel.cutedsl import range_last_writer, range_write_order
 from magi_attention.kernel.cutedsl.block_info import BlockInfo
 from magi_attention.kernel.cutedsl.ffa_utils import MT_MAP
 from magi_attention.testing.cutedsl_utils import (
@@ -191,7 +191,7 @@ class _FoldBwdHarness:
             self.mask_type is None or self.mask_type == MT_MAP.causal,
         )
         tidx = cute.arch.thread_idx()[0]
-        range_write_index.fold_dq_last(
+        range_last_writer.fold_dq_last(
             block_info,
             mQRanges,
             mKRanges,
@@ -211,7 +211,7 @@ class _FoldBwdHarness:
         if cutlass.const_expr(not self.range_merge):
             assert mDKVLast is not None
             if tidx < cute.arch.WARP_SIZE:
-                range_write_index.fold_dkv_last(
+                range_last_writer.fold_dkv_last(
                     block_info,
                     mQRanges,
                     mKRanges,
@@ -224,6 +224,97 @@ class _FoldBwdHarness:
                     self.cluster_tile_k,
                     self.use_per_range_mask,
                 )
+
+
+def _ref_dq_pair_needs_last(
+    seqlen_q: int, seqlen_k: int, k_tile: int, tile_m: int, tile_n: int, attn: int
+) -> bool:
+    """Whether some M tile of the pair has ``k_tile`` as its first K tile."""
+    if seqlen_q <= 0 or seqlen_k <= 0:
+        return False
+    for mt in range(math.ceil(seqlen_q / tile_m)):
+        for n in range(math.ceil(seqlen_k / tile_n)):
+            m_lo, m_hi = _ref_m_bounds_per_range(
+                seqlen_q, seqlen_k, n, tile_m, tile_n, attn
+            )
+            if m_lo <= mt < m_hi:
+                if n == k_tile:
+                    return True
+                break
+    return False
+
+
+class _DqNeedsLastHarness:
+    """Stores ``dq_pair_needs_last`` (one pair per row) or ``dq_group_needs_last``
+    (one RangeMerge group per row) for every K tile of the row into ``mNeeds``."""
+
+    def __init__(self, tile_m: int, cluster_tile_k: int, range_merge: bool):
+        self.tile_m = tile_m
+        self.cluster_tile_k = cluster_tile_k
+        self.range_merge = range_merge
+
+    @cute.jit
+    def __call__(
+        self,
+        mQRanges: cute.Tensor,
+        mKRanges: cute.Tensor,
+        mMaskTypes: cute.Tensor,
+        mCuBatches: Optional[cute.Tensor],
+        mNeeds: cute.Tensor,
+        stream: cuda.CUstream = None,
+    ):
+        self.kernel(mQRanges, mKRanges, mMaskTypes, mCuBatches, mNeeds).launch(
+            grid=(1, 1, 1), block=(32, 1, 1), stream=stream
+        )
+
+    @cute.kernel
+    def kernel(
+        self,
+        mQRanges: cute.Tensor,
+        mKRanges: cute.Tensor,
+        mMaskTypes: cute.Tensor,
+        mCuBatches: Optional[cute.Tensor],
+        mNeeds: cute.Tensor,
+    ):
+        block_info = BlockInfo(self.tile_m, self.cluster_tile_k, True)
+        if cute.arch.thread_idx()[0] == 0:
+            row = Int32(0)
+            while row < mNeeds.shape[0]:
+                seqlen_k = mKRanges[row, 1] - mKRanges[row, 0]
+                k_tile = Int32(0)
+                while k_tile * self.cluster_tile_k < seqlen_k:
+                    needs = cutlass.Boolean(False)
+                    if cutlass.const_expr(self.range_merge):
+                        assert mCuBatches is not None
+                        needs = range_write_order.dq_group_needs_last(
+                            block_info,
+                            mQRanges,
+                            mMaskTypes,
+                            mCuBatches[row],
+                            mCuBatches[row + 1],
+                            seqlen_k,
+                            k_tile,
+                        )
+                    else:
+                        seqlen_q = mQRanges[row, 1] - mQRanges[row, 0]
+                        attn = Int32(mMaskTypes[row])
+                        m_lo, m_hi = range_last_writer.pair_m_bounds(
+                            block_info, seqlen_q, seqlen_k, k_tile, attn, True
+                        )
+                        needs = range_write_order.dq_pair_needs_last(
+                            block_info,
+                            seqlen_q,
+                            seqlen_k,
+                            k_tile,
+                            m_lo,
+                            m_hi,
+                            attn,
+                            True,
+                        )
+                    if needs:
+                        mNeeds[row, k_tile] = Int32(1)
+                    k_tile += 1
+                row += 1
 
 
 def _fake_i32(*shape):
@@ -260,6 +351,42 @@ _BWD_MERGE_FIXTURE = (
     * 8,
     [g + 5 * rep for rep in range(8) for g in (0, 0, 1, 2, 2, 3, 4)],
 )
+
+# K groups with the (Q range, mask) rows that share each of them. Every mask
+# type appears with seqlen_q below, equal to and above seqlen_k, so M tiles
+# start on K tile 0 as well as on later K tiles.
+_DQ_NEEDS_LAST_GROUPS: list[tuple[list[int], list[tuple[list[int], int]]]] = [
+    (
+        [0, 1500],
+        [
+            ([0, 1200], MT_MAP.full),
+            ([64, 1100], MT_MAP.causal),
+            ([200, 1400], MT_MAP.inv_causal),
+            ([0, 1500], MT_MAP.bi_causal),
+        ],
+    ),
+    (
+        [100, 1900],
+        [
+            ([0, 700], MT_MAP.inv_causal),
+            ([64, 600], MT_MAP.bi_causal),
+            ([10, 1046], MT_MAP.causal),
+        ],
+    ),
+    (
+        [0, 700],
+        [
+            ([0, 1500], MT_MAP.causal),
+            ([350, 1700], MT_MAP.inv_causal),
+            ([10, 10], MT_MAP.causal),
+            ([0, 1600], MT_MAP.bi_causal),
+        ],
+    ),
+    ([256, 1156], [([10, 900], MT_MAP.causal)]),
+    ([300, 2100], [([0, 520], MT_MAP.bi_causal), ([0, 1300], MT_MAP.full)]),
+    ([512, 512], [([0, 300], MT_MAP.full)]),
+    ([0, 1300], [([128, 1428], MT_MAP.causal), ([0, 1300], MT_MAP.inv_causal)]),
+]
 
 _TILE_M = 128
 _CLUSTER_TILE_K = 256
@@ -459,6 +586,91 @@ class TestRangeWriteFold(TestCase):
         )
         assert_equal(
             dq_last[0].cpu(), want_dq, test_case=test_case, print_no_mismatch=False
+        )
+
+
+@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
+class TestDqNeedsLast(TestCase):
+    def setUp(self) -> None:
+        self.device = torch.cuda.current_device()
+
+    def _run(
+        self,
+        q_list: list[list[int]],
+        k_list: list[list[int]],
+        masks: list[int],
+        cu: list[int] | None,
+        num_k_tiles: int,
+    ) -> torch.Tensor:
+        sym = cute.sym_int
+        fn = cute.compile(
+            _DqNeedsLastHarness(_TILE_M, _CLUSTER_TILE_K, cu is not None),
+            _fake_i32(sym(), 2),
+            _fake_i32(sym(), 2),
+            _fake_i32(sym()),
+            None if cu is None else _fake_i32(sym()),
+            _fake_i32(sym(), sym()),
+            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
+            options="--enable-tvm-ffi",
+        )
+        needs = torch.zeros(
+            len(k_list), num_k_tiles, dtype=torch.int32, device=self.device
+        )
+        fn(
+            to_ranges_tensor(q_list, self.device),
+            to_ranges_tensor(k_list, self.device),
+            torch.tensor(masks, dtype=torch.int32, device=self.device),
+            None
+            if cu is None
+            else torch.tensor(cu, dtype=torch.int32, device=self.device),
+            needs,
+        )
+        return needs.cpu()
+
+    def test_dq_pair_needs_last_matches_reference(self):
+        test_case = "[dq_needs_last][pair]"
+        q_list = [q for _, rows in _DQ_NEEDS_LAST_GROUPS for q, _ in rows]
+        k_list = [k for k, rows in _DQ_NEEDS_LAST_GROUPS for _ in rows]
+        masks = [mask for _, rows in _DQ_NEEDS_LAST_GROUPS for _, mask in rows]
+        num_k_tiles = max(math.ceil((e - s) / _CLUSTER_TILE_K) for s, e in k_list)
+        want = torch.zeros(len(k_list), num_k_tiles, dtype=torch.int32)
+        for row, ((qs, qe), (ks, ke), mask) in enumerate(zip(q_list, k_list, masks)):
+            for k_tile in range(math.ceil((ke - ks) / _CLUSTER_TILE_K)):
+                want[row, k_tile] = _ref_dq_pair_needs_last(
+                    qe - qs, ke - ks, k_tile, _TILE_M, _CLUSTER_TILE_K, mask
+                )
+        self.assertTrue(bool(want[:, 1:].any()))
+        assert_equal(
+            self._run(q_list, k_list, masks, None, num_k_tiles),
+            want,
+            test_case=test_case,
+            print_no_mismatch=False,
+        )
+
+    def test_dq_group_needs_last_matches_reference(self):
+        test_case = "[dq_needs_last][group]"
+        q_list = [q for _, rows in _DQ_NEEDS_LAST_GROUPS for q, _ in rows]
+        k_list = [k for k, _ in _DQ_NEEDS_LAST_GROUPS]
+        masks = [mask for _, rows in _DQ_NEEDS_LAST_GROUPS for _, mask in rows]
+        cu = [0]
+        for _, rows in _DQ_NEEDS_LAST_GROUPS:
+            cu.append(cu[-1] + len(rows))
+        num_k_tiles = max(math.ceil((e - s) / _CLUSTER_TILE_K) for s, e in k_list)
+        want = torch.zeros(len(k_list), num_k_tiles, dtype=torch.int32)
+        for g, ((ks, ke), rows) in enumerate(_DQ_NEEDS_LAST_GROUPS):
+            for k_tile in range(math.ceil((ke - ks) / _CLUSTER_TILE_K)):
+                want[g, k_tile] = any(
+                    _ref_dq_pair_needs_last(
+                        qe - qs, ke - ks, k_tile, _TILE_M, _CLUSTER_TILE_K, mask
+                    )
+                    for (qs, qe), mask in rows
+                )
+        self.assertTrue(bool(want[:, 1:].any()))
+        assert_equal(
+            self._run(q_list, k_list, masks, cu, num_k_tiles),
+            want,
+            test_case=test_case,
+            print_no_mismatch=False,
         )
 
 

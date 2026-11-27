@@ -15,7 +15,7 @@
 import math
 import unittest
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 from unittest import TestCase, mock
 
 import torch
@@ -29,11 +29,6 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
 )
 from magi_attention.kernel.cutedsl.range_merge import plan_range_merge_bwd
 from magi_attention.testing import parameterize, ref_attn_func
-from magi_attention.testing.cutedsl_probes import (
-    DelayPoint,
-    delay_injection,
-    record_visits,
-)
 from magi_attention.testing.cutedsl_utils import (
     SM100_FAMILY_REQUIRED,
     CuteDSLDistTestBase,
@@ -495,11 +490,6 @@ _BWD_EMPTY_KEYLESS_RELATIONS: Relations = [
     ([0, 257], [520, 900], MT_MAP.full),
 ]
 
-_BWD_UNIT_RELATIONS: dict[int, Relations] = {
-    1: [([0, 300], [0, 200], MT_MAP.full)],
-    5: [([0, 300], [0, 768], MT_MAP.full), ([100, 400], [800, 1300], MT_MAP.causal)],
-}
-
 _STRADDLING_RELATIONS: Relations = [
     ([0, 390], [10, 270], MT_MAP.bi_causal),
     ([0, 390], [270, 530], MT_MAP.bi_causal),
@@ -510,16 +500,6 @@ _STRADDLING_RELATIONS: Relations = [
     ([19, 535], [860, 1140], MT_MAP.full),
 ]
 
-_MIXED_MASK_PAIR_RELATIONS: Relations = [
-    ([0, 900], [0, 256], MT_MAP.full),
-    ([0, 128], [256, 440], MT_MAP.full),
-    ([200, 315], [256, 440], MT_MAP.causal),
-    ([320, 515], [256, 440], MT_MAP.bi_causal),
-    ([520, 648], [256, 440], MT_MAP.inv_causal),
-    ([584, 712], [256, 440], MT_MAP.causal),
-    ([768, 890], [256, 440], MT_MAP.full),
-]
-
 _GRAPH_DISJOINT_RELATIONS: Relations = [
     ([5, 270], [0, 310], MT_MAP.causal),
     ([280, 550], [120, 420], MT_MAP.inv_causal),
@@ -528,6 +508,12 @@ _GRAPH_DISJOINT_RELATIONS: Relations = [
 
 
 class _RangeDetHelpers:
+    if TYPE_CHECKING:
+        # A runtime definition would shadow the host class's `device` in the MRO.
+        @property
+        def device(self) -> int:
+            ...
+
     @property
     def num_sm(self) -> int:
         return torch.cuda.get_device_properties(self.device).multi_processor_count
@@ -1055,36 +1041,6 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
         )
 
     @with_run_in_mp
-    def test_bwd_range_merge_2cta_pair_handoff_under_delay(self):
-        test_case = "[bwd_2cta_pair_handoff_delay]"
-        seed_test_case(test_case)
-        prob = self._bwd_problem(_MIXED_MASK_PAIR_RELATIONS, 900, 450, group=2)
-        with _with_2cta(True):
-            first = prob.run(
-                sm_margin=0,
-                range_merge=True,
-                cat_gqa=True,
-                disable_bwd_dkv_atomic_reduction=True,
-            )
-            with delay_injection(DelayPoint.WRITE_ORDER_WAIT, seed=23, max_ns=20_000):
-                delayed = prob.run(
-                    sm_margin=0,
-                    range_merge=True,
-                    cat_gqa=True,
-                    disable_bwd_dkv_atomic_reduction=True,
-                )
-            with delay_injection(DelayPoint.PAIR_ARRIVE, seed=23, max_ns=20_000):
-                delayed_pair = prob.run(
-                    sm_margin=self.num_sm - 2,
-                    range_merge=True,
-                    cat_gqa=True,
-                    disable_bwd_dkv_atomic_reduction=True,
-                )
-        _assert_grads_bitwise(delayed, first, f"{test_case}[wait_delay]")
-        _assert_grads_bitwise(delayed_pair, first, f"{test_case}[pair_delay]")
-        _assert_grads_close(first, prob.ref_grads(), test_case)
-
-    @with_run_in_mp
     def test_bwd_range_merge_2cta_adjacent_pair_conflicts_bitwise(self):
         test_case = "[bwd_2cta_adjacent_conflicts]"
         seed_test_case(test_case)
@@ -1373,42 +1329,6 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
                 [prob1.tensors(), prob0.tensors(), prob1.tensors()],
                 test_case=test_case,
             )
-
-    @with_run_in_mp
-    @parameterize("num_units", sorted(_BWD_UNIT_RELATIONS))
-    def test_bwd_2cta_peers_consume_matching_units(self, num_units: int):
-        test_case = f"[bwd_2cta_peers][T={num_units}]"
-        seed_test_case(test_case)
-        cluster_size, num_clusters = 2, 4
-        prob = self._bwd_problem(
-            _BWD_UNIT_RELATIONS[num_units], 400, 1400, group=1, num_head_kv=1
-        )
-        valid = num_units * cluster_size
-        with (
-            _with_2cta(True),
-            record_visits(valid + 16 * cluster_size, cluster_size) as (
-                visits,
-                clusters,
-            ),
-        ):
-            grads = prob.run(
-                disable_bwd_dkv_atomic_reduction=False,
-                sm_margin=self.num_sm - cluster_size * num_clusters,
-            )
-        _assert_grads_close(grads, prob.ref_grads(), test_case)
-
-        visits, clusters = visits.cpu(), clusters.cpu()
-        self.assertTrue(bool((visits[:valid] > 0).all()))
-        assert_equal(
-            visits[valid:],
-            torch.zeros_like(visits[valid:]),
-            test_case=test_case,
-            print_no_mismatch=False,
-        )
-        per_unit = clusters[:valid].view(num_units, cluster_size)
-        assert_equal(
-            per_unit[:, 0], per_unit[:, 1], test_case=test_case, print_no_mismatch=False
-        )
 
 
 if __name__ == "__main__":

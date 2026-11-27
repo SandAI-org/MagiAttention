@@ -1004,6 +1004,8 @@ def ld_acquire_cta(lock_ptr: cute.Pointer, *, loc=None, ip=None) -> cutlass.Int3
         has_side_effects=True,
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
     )
     return cutlass.Int32(state)
 
@@ -1929,6 +1931,8 @@ def mbarrier_arrive_peer_release_cluster(
         has_side_effects=True,
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
     )
 
 
@@ -1952,6 +1956,8 @@ def mbarrier_wait_acquire_cluster(
         has_side_effects=True,
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
     )
 
 
@@ -1989,4 +1995,6 @@ def store_shared_remote_v4(
         has_side_effects=True,
         is_align_stack=False,
         asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
     )

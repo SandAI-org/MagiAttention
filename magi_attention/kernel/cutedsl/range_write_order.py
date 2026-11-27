@@ -22,7 +22,7 @@ from cutlass import Int32, const_expr
 # isort: split
 from quack.cute_dsl_utils import ParamsBase
 
-from . import range_write_index
+from . import range_last_writer
 from .block_info import BlockInfo
 from .cutedsl_utils import (
     elem_pointer,
@@ -41,9 +41,10 @@ class WriteOrderTensors(ParamsBase):
     """Write order of one output and per-CTA last-writer state.
 
     ``mWriteOrder[b, h] = [published, count]``. Writer ``j`` of range ``r`` is
-    ``r * writer_stride + j + 1`` (0: none), so ``writer_stride`` is the count
-    of writer numbers per range. ``mLast[cta, b]`` holds the highest writer on
-    block ``b`` folded by CTA ``cta`` so far (0: none).
+    ``range_last_writer.writer_number(r, writer_stride, j)`` (0: none), so
+    ``writer_stride`` is the count of writer numbers per range. ``mLast[cta, b]``
+    holds the highest writer on block ``b`` folded by CTA ``cta`` so far
+    (0: none).
     """
 
     mWriteOrder: cute.Tensor
@@ -59,7 +60,7 @@ def tile_arrivals(
     block_size: cutlass.Constexpr[int],
 ):
     row = range_start + tile_idx * block_size
-    left, right = range_write_index.tile_blocks(
+    left, right = range_last_writer.tile_blocks(
         range_start, range_end, tile_idx, block_size
     )
     unaligned = range_start % block_size != 0
@@ -91,7 +92,7 @@ def arrive(
     head: Int32,
     writer: Int32,
     weight: Int32,
-    cluster_size: cutlass.Constexpr[int] = 1,
+    cluster_size: cutlass.Constexpr[int],
 ) -> None:
     """Arrive after CTA writes complete; count resets before release publish while successor waits."""
     if weight == 2 * cluster_size:
@@ -107,6 +108,59 @@ def arrive(
 @cute.jit
 def publish(mWriteOrder: cute.Tensor, block: Int32, head: Int32, writer: Int32) -> None:
     st_global_release_gpu_i32(elem_pointer(mWriteOrder, (block, head, 0)), writer)
+
+
+@cute.jit
+def last_writer(mLast: cute.Tensor, slot: Int32, block: Int32) -> Int32:
+    """Highest writer that CTA ``slot`` folded on ``block`` so far (0: none)."""
+    return ld_acquire_cta(elem_pointer(mLast, (slot, block)))
+
+
+@cute.jit
+def last_writers(mLast: cute.Tensor, slot: Int32, left: Int32, right: Int32):
+    """``last_writer`` of the left and the right block of a tile."""
+    pred_left = last_writer(mLast, slot, left)
+    pred_right = pred_left
+    if right != left:
+        pred_right = last_writer(mLast, slot, right)
+    return pred_left, pred_right
+
+
+@cute.jit
+def wait_published_blocks(
+    mWriteOrder: cute.Tensor,
+    left: Int32,
+    right: Int32,
+    head: Int32,
+    pred_left: Int32,
+    pred_right: Int32,
+) -> None:
+    """Wait for the predecessor on the left block of a tile and, when the tile
+    spans two blocks, on the right block. A negative predecessor skips its block."""
+    if pred_left >= 0:
+        wait_published(mWriteOrder, left, head, pred_left)
+    if right != left and pred_right >= 0:
+        wait_published(mWriteOrder, right, head, pred_right)
+
+
+@cute.jit
+def arrive_blocks(
+    mWriteOrder: cute.Tensor,
+    left: Int32,
+    right: Int32,
+    head: Int32,
+    writer: Int32,
+    left_weight: Int32,
+    right_weight: Int32,
+    cluster_size: cutlass.Constexpr[int],
+) -> None:
+    """Arrive on the left block of a tile and, when the tile spans two blocks,
+    on the right block. A zero weight skips its block. The caller makes the
+    writes of the tile GPU-visible before the call."""
+    if left_weight > 0:
+        arrive(mWriteOrder, left, head, writer, left_weight, cluster_size)
+    if right != left and right_weight > 0:
+        arrive(mWriteOrder, right, head, writer, right_weight, cluster_size)
 
 
 @cute.jit
@@ -130,7 +184,7 @@ def _dkv_neighbor_active(
     n_cta_neighbor: Int32,
     use_per_range_mask: cutlass.Constexpr[bool],
 ) -> cutlass.Boolean:
-    m_lo, m_hi = range_write_index.pair_m_bounds(
+    m_lo, m_hi = range_last_writer.pair_m_bounds(
         block_info,
         seqlen_info.seqlen_q,
         seqlen_info.seqlen_k,
@@ -192,11 +246,13 @@ def dkv_wait(
     else:
         head_kv = head_idx // kv_group
         group_rank = head_idx % kv_group
-    writer = batch_idx * dkv_write_order.writer_stride + group_rank + 1
-    slot = cute.arch.block_idx()[0]
+    writer = range_last_writer.writer_number(
+        batch_idx, dkv_write_order.writer_stride, group_rank
+    )
+    slot = range_last_writer.cta_slot()
     if group_rank == 0 and dkv_folded < batch_idx:
         if is_fold_warp:
-            range_write_index.fold_dkv_last(
+            range_last_writer.fold_dkv_last(
                 block_info,
                 mQRanges,
                 mKRanges,
@@ -214,16 +270,12 @@ def dkv_wait(
         pred_left = writer - 1
         pred_right = writer - 1
         if group_rank == 0:
-            pred_left = ld_acquire_cta(
-                elem_pointer(dkv_write_order.mLast, (slot, left))
+            pred_left, pred_right = last_writers(
+                dkv_write_order.mLast, slot, left, right
             )
-            if right != left:
-                pred_right = ld_acquire_cta(
-                    elem_pointer(dkv_write_order.mLast, (slot, right))
-                )
-        wait_published(dkv_write_order.mWriteOrder, left, head_kv, pred_left)
-        if right != left:
-            wait_published(dkv_write_order.mWriteOrder, right, head_kv, pred_right)
+        wait_published_blocks(
+            dkv_write_order.mWriteOrder, left, right, head_kv, pred_left, pred_right
+        )
     return left, right, left_weight, right_weight, writer, head_kv, dkv_folded
 
 
@@ -231,7 +283,7 @@ def dkv_wait(
 def _dq_merge_overlap_scan(
     block_info: BlockInfo,
     mQRanges: cute.Tensor,
-    mMaskTypes: Optional[cute.Tensor],
+    mMaskTypes: cute.Tensor,
     pair_beg: Int32,
     pair_cur: Int32,
     pair_end: Int32,
@@ -241,7 +293,6 @@ def _dq_merge_overlap_scan(
     right: Int32,
     need_prev_n: cutlass.Boolean,
     tile_m: cutlass.Constexpr[int],
-    use_per_range_mask: cutlass.Constexpr[bool],
 ):
     earlier_left = cutlass.Boolean(False)
     earlier_right = cutlass.Boolean(False)
@@ -258,26 +309,18 @@ def _dq_merge_overlap_scan(
             b0 = q_s // tile_m
             b1 = (q_e - 1) // tile_m
             if b0 <= right and b1 >= left:
-                attn_r = Int32(MT_MAP.full)
-                if const_expr(use_per_range_mask):
-                    assert mMaskTypes is not None
-                    attn_r = Int32(mMaskTypes[row])
-                is_masked = cutlass.Boolean(False)
-                if const_expr(use_per_range_mask):
-                    is_masked = attn_r != MT_MAP.full
-                elif const_expr(block_info.is_causal or block_info.is_local):
-                    is_masked = cutlass.Boolean(True)
+                attn_r = Int32(mMaskTypes[row])
                 if row != pair_cur:
                     act_s = q_s
                     act_e = q_e
-                    if is_masked:
-                        lo_r, hi_r = range_write_index.pair_m_bounds(
+                    if attn_r != MT_MAP.full:
+                        lo_r, hi_r = range_last_writer.pair_m_bounds(
                             block_info,
                             seqlen_q,
                             seqlen_k_group,
                             n_block_cta_group,
                             attn_r,
-                            use_per_range_mask,
+                            True,
                         )
                         act_s = q_s + lo_r * tile_m
                         act_e = cutlass.min(q_s + hi_r * tile_m, q_e)
@@ -298,7 +341,7 @@ def _dq_merge_overlap_scan(
                     blk = cutlass.max(left, b0)
                     blk_hi = cutlass.min(right, b1)
                     while blk <= blk_hi:
-                        cur_prev = range_write_index.dq_pair_prev_k_tile_on_block(
+                        cur_prev = range_last_writer.dq_pair_prev_k_tile_on_block(
                             block_info,
                             seqlen_q,
                             seqlen_k_group,
@@ -306,7 +349,7 @@ def _dq_merge_overlap_scan(
                             attn_r,
                             blk,
                             n_block_cta_group,
-                            use_per_range_mask,
+                            True,
                         )
                         if blk == left:
                             prev_n_left = cutlass.max(prev_n_left, cur_prev)
@@ -336,10 +379,103 @@ def _dq_wait_pred(
     pred = Int32(-1)
     if do_wait:
         if prev_n >= 0:
-            pred = batch_idx * dq_write_order.writer_stride + prev_n + 1
+            pred = range_last_writer.writer_number(
+                batch_idx, dq_write_order.writer_stride, prev_n
+            )
         else:
-            pred = ld_acquire_cta(elem_pointer(dq_write_order.mLast, (slot, block)))
+            pred = last_writer(dq_write_order.mLast, slot, block)
     return pred
+
+
+@cute.jit
+def _dq_first_k_tile(
+    block_info: BlockInfo,
+    seqlen_q: Int32,
+    seqlen_k: Int32,
+    m_tile: Int32,
+    k_tile: Int32,
+    attn_type: Int32,
+    use_per_range_mask: cutlass.Constexpr[bool],
+) -> cutlass.Boolean:
+    """Whether ``k_tile`` is the first K tile that M tile ``m_tile`` of a pair
+    visits. That M tile has no writer of its own on an earlier K tile, so its
+    predecessor is a neighbouring M tile of the range or a writer of an earlier
+    range, which ``mLast`` holds."""
+    first = k_tile == 0
+    if k_tile > 0:
+        n_min, _ = range_last_writer.pair_n_bounds(
+            block_info, seqlen_q, seqlen_k, m_tile, attn_type, use_per_range_mask
+        )
+        first = n_min == k_tile
+    return first
+
+
+@cute.jit
+def dq_pair_needs_last(
+    block_info: BlockInfo,
+    seqlen_q: Int32,
+    seqlen_k: Int32,
+    k_tile: Int32,
+    m_lo: Int32,
+    m_hi: Int32,
+    attn_type: Int32,
+    use_per_range_mask: cutlass.Constexpr[bool],
+) -> cutlass.Boolean:
+    """Whether ``dq_plan`` may read ``mLast`` for an M tile of ``[m_lo, m_hi)``,
+    the M tiles of a pair that are active on ``k_tile``.
+
+    ``dq_plan`` reads ``mLast`` only for an M tile whose first K tile is
+    ``k_tile``. The first K tile of an M tile does not decrease with the M
+    tile and is at most ``k_tile`` for every active one, so the last active M
+    tile decides for all of them.
+    """
+    needs = cutlass.Boolean(False)
+    if m_lo < m_hi:
+        needs = _dq_first_k_tile(
+            block_info,
+            seqlen_q,
+            seqlen_k,
+            m_hi - 1,
+            k_tile,
+            attn_type,
+            use_per_range_mask,
+        )
+    return needs
+
+
+@cute.jit
+def dq_group_needs_last(
+    block_info: BlockInfo,
+    mQRanges: cute.Tensor,
+    mMaskTypes: cute.Tensor,
+    pair_beg: Int32,
+    pair_end: Int32,
+    seqlen_k_group: Int32,
+    k_tile: Int32,
+) -> cutlass.Boolean:
+    """``dq_pair_needs_last`` for any pair ``[pair_beg, pair_end)`` of a
+    RangeMerge group on ``k_tile``."""
+    needs = cutlass.Boolean(False)
+    row = pair_beg
+    while row < pair_end and not needs:
+        seqlen_q = mQRanges[row, 1] - mQRanges[row, 0]
+        if seqlen_q > 0:
+            attn_r = Int32(mMaskTypes[row])
+            m_lo, m_hi = range_last_writer.pair_m_bounds(
+                block_info, seqlen_q, seqlen_k_group, k_tile, attn_r, True
+            )
+            needs = dq_pair_needs_last(
+                block_info,
+                seqlen_q,
+                seqlen_k_group,
+                k_tile,
+                m_lo,
+                m_hi,
+                attn_r,
+                True,
+            )
+        row += 1
+    return needs
 
 
 @cute.jit
@@ -354,6 +490,7 @@ def dq_plan(
     m_block_active_start: Int32,
     m_block_active_end: Int32,
     mQRanges: cute.Tensor,
+    is_waiter: cutlass.Boolean,
     tile_m: cutlass.Constexpr[int],
     range_merge: cutlass.Constexpr[bool],
     use_per_range_mask: cutlass.Constexpr[bool],
@@ -362,158 +499,120 @@ def dq_plan(
     seqlen_k_group: Int32 = Int32(0),
     group_has_block_overlap: cutlass.Boolean = cutlass.Boolean(False),
 ):
-    """Wait on the immediately preceding active writer on left/right physical dQ blocks.
+    """Plan the waits and arrivals of one M tile on its left/right physical dQ blocks.
 
-    A tile overlaps 1 or 2 physical Q blocks and waits on its earlier K tile in
-    the same group (or folds earlier groups via ``mLast``). Unaligned monotone
-    ranges arrive once per block on the first/last active M tile; overlapping
+    Returns ``(left, right, wait_pred_left, wait_pred_right, arrive_weight_left,
+    arrive_weight_right)`` for ``wait_published_blocks`` and ``arrive_blocks``.
+    Only the waiter thread plans; every other thread gets a plan that waits
+    and arrives on no block.
+
+    A tile overlaps 1 or 2 physical Q blocks and waits on the immediately
+    preceding active writer: its earlier K tile in the same group, or the last
+    writer of earlier groups folded in ``mLast``. Unaligned monotone ranges
+    arrive once per block on the first/last active M tile; overlapping
     RangeMerge pairs scan sibling Q intervals within the group.
     """
-    q_start = seqlen_info.offset_q
-    left, right = range_write_index.tile_blocks(
-        q_start, q_start + seqlen_info.seqlen_q, m_block, tile_m
-    )
-    wait_left = cutlass.Boolean(True)
-    if m_block > m_block_active_start and (q_start % tile_m) != 0:
-        wait_left = cutlass.Boolean(False)
-    wait_right = right != left
+    left = Int32(0)
+    right = Int32(0)
+    wait_pred_left = Int32(-1)
+    wait_pred_right = Int32(-1)
+    arrive_weight_left = Int32(0)
+    arrive_weight_right = Int32(0)
+    if is_waiter:
+        q_start = seqlen_info.offset_q
+        left, right = range_last_writer.tile_blocks(
+            q_start, q_start + seqlen_info.seqlen_q, m_block, tile_m
+        )
+        wait_left = cutlass.Boolean(True)
+        if m_block > m_block_active_start and (q_start % tile_m) != 0:
+            wait_left = cutlass.Boolean(False)
+        wait_right = right != left
 
-    arrive_left = cutlass.Boolean(True)
-    arrive_right = cutlass.Boolean(False)
-    if right != left and m_block == m_block_active_end - 1:
-        arrive_right = cutlass.Boolean(True)
+        arrive_weight_left = Int32(2)
+        if right != left and m_block == m_block_active_end - 1:
+            arrive_weight_right = Int32(2)
 
-    n_min_m = Int32(0)
-    if n_block_cta_group > 0:
-        n_min_m, _ = range_write_index.pair_n_bounds(
+        need_prev_n = n_block_cta_group > 0 and _dq_first_k_tile(
             block_info,
             seqlen_info.seqlen_q,
             seqlen_info.seqlen_k,
             m_block,
+            n_block_cta_group,
             attn_type,
             use_per_range_mask,
         )
-    need_prev_n = n_block_cta_group > 0 and n_min_m == n_block_cta_group
 
-    prev_n_left = n_block_cta_group - 1
-    prev_n_right = n_block_cta_group - 1
-    if n_block_cta_group == 0:
-        prev_n_left = Int32(-1)
-        prev_n_right = Int32(-1)
-    elif need_prev_n:
-        prev_n_left = Int32(-1)
-        prev_n_right = Int32(-1)
-        if not (const_expr(range_merge) and group_has_block_overlap):
-            if wait_left and (q_start % tile_m) != 0 and m_block > 0:
-                l_prev, r_prev = range_write_index.pair_n_bounds(
+        prev_n_left = n_block_cta_group - 1
+        prev_n_right = n_block_cta_group - 1
+        if n_block_cta_group == 0:
+            prev_n_left = Int32(-1)
+            prev_n_right = Int32(-1)
+        elif need_prev_n:
+            prev_n_left = Int32(-1)
+            prev_n_right = Int32(-1)
+            if not (const_expr(range_merge) and group_has_block_overlap):
+                if wait_left and (q_start % tile_m) != 0 and m_block > 0:
+                    l_prev, r_prev = range_last_writer.pair_n_bounds(
+                        block_info,
+                        seqlen_info.seqlen_q,
+                        seqlen_info.seqlen_k,
+                        m_block - 1,
+                        attn_type,
+                        use_per_range_mask,
+                    )
+                    if r_prev > l_prev and l_prev < n_block_cta_group:
+                        prev_n_left = cutlass.min(n_block_cta_group, r_prev) - 1
+
+        if const_expr(range_merge):
+            if group_has_block_overlap:
+                assert group_pairs is not None
+                assert mMaskTypes is not None
+                (
+                    earlier_left,
+                    earlier_right,
+                    later_left,
+                    later_right,
+                    ov_prev_left,
+                    ov_prev_right,
+                ) = _dq_merge_overlap_scan(
                     block_info,
-                    seqlen_info.seqlen_q,
-                    seqlen_info.seqlen_k,
-                    m_block - 1,
-                    attn_type,
-                    use_per_range_mask,
+                    mQRanges,
+                    mMaskTypes,
+                    group_pairs[0],
+                    group_pairs[1],
+                    group_pairs[2],
+                    seqlen_k_group,
+                    n_block_cta_group,
+                    left,
+                    right,
+                    need_prev_n,
+                    tile_m,
                 )
-                if r_prev > l_prev and l_prev < n_block_cta_group:
-                    prev_n_left = cutlass.min(n_block_cta_group, r_prev) - 1
+                if earlier_left:
+                    wait_left = cutlass.Boolean(False)
+                if earlier_right:
+                    wait_right = cutlass.Boolean(False)
+                if later_left:
+                    arrive_weight_left = Int32(0)
+                if later_right:
+                    arrive_weight_right = Int32(0)
+                if need_prev_n:
+                    prev_n_left = ov_prev_left
+                    prev_n_right = ov_prev_right
 
-    if const_expr(range_merge):
-        if group_has_block_overlap:
-            assert group_pairs is not None
-            (
-                earlier_left,
-                earlier_right,
-                later_left,
-                later_right,
-                ov_prev_left,
-                ov_prev_right,
-            ) = _dq_merge_overlap_scan(
-                block_info,
-                mQRanges,
-                mMaskTypes,
-                group_pairs[0],
-                group_pairs[1],
-                group_pairs[2],
-                seqlen_k_group,
-                n_block_cta_group,
-                left,
-                right,
-                need_prev_n,
-                tile_m,
-                use_per_range_mask,
-            )
-            if earlier_left:
-                wait_left = cutlass.Boolean(False)
-            if earlier_right:
-                wait_right = cutlass.Boolean(False)
-            if later_left:
-                arrive_left = cutlass.Boolean(False)
-            if later_right:
-                arrive_right = cutlass.Boolean(False)
-            if need_prev_n:
-                prev_n_left = ov_prev_left
-                prev_n_right = ov_prev_right
-
-    slot = cute.arch.block_idx()[0]
-    wait_pred_left = _dq_wait_pred(
-        dq_write_order, slot, batch_idx, left, prev_n_left, wait_left
-    )
-    wait_pred_right = _dq_wait_pred(
-        dq_write_order, slot, batch_idx, right, prev_n_right, wait_right
-    )
+        slot = range_last_writer.cta_slot()
+        wait_pred_left = _dq_wait_pred(
+            dq_write_order, slot, batch_idx, left, prev_n_left, wait_left
+        )
+        wait_pred_right = _dq_wait_pred(
+            dq_write_order, slot, batch_idx, right, prev_n_right, wait_right
+        )
 
     return (
         left,
         right,
         wait_pred_left,
         wait_pred_right,
-        arrive_left,
-        arrive_right,
+        arrive_weight_left,
+        arrive_weight_right,
     )
-
-
-@cute.jit
-def dq_wait_planned(
-    dq_write_order: WriteOrderTensors,
-    left: Int32,
-    right: Int32,
-    wait_pred_left: Int32,
-    wait_pred_right: Int32,
-    q_head: Int32,
-) -> None:
-    if wait_pred_left >= 0:
-        wait_published(dq_write_order.mWriteOrder, left, q_head, wait_pred_left)
-    if wait_pred_right >= 0:
-        wait_published(dq_write_order.mWriteOrder, right, q_head, wait_pred_right)
-
-
-@cute.jit
-def dq_arrive_planned(
-    dq_write_order: WriteOrderTensors,
-    dq_writer: Int32,
-    left: Int32,
-    right: Int32,
-    arrive_left: cutlass.Boolean,
-    arrive_right: cutlass.Boolean,
-    q_head: Int32,
-    cluster_size: cutlass.Constexpr[int],
-) -> None:
-    if arrive_left or arrive_right:
-        cute.arch.fence_acq_rel_gpu()
-        if arrive_left:
-            arrive(
-                dq_write_order.mWriteOrder,
-                left,
-                q_head,
-                dq_writer,
-                Int32(2),
-                cluster_size,
-            )
-        if arrive_right:
-            arrive(
-                dq_write_order.mWriteOrder,
-                right,
-                q_head,
-                dq_writer,
-                Int32(2),
-                cluster_size,
-            )

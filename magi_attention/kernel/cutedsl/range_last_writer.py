@@ -25,6 +25,27 @@ from .ffa_utils import MT_MAP
 
 
 @cute.jit
+def writer_number(range_idx: Int32, writer_stride: Int32, rank: Int32) -> Int32:
+    """Number of writer ``rank`` of range ``range_idx``; 0 means no writer.
+
+    A range has ``writer_stride`` writers per (block, head). Numbers grow with
+    the range index and, inside a range, with ``rank``, so the largest number
+    folded on a block is the last writer in write order.
+    """
+    return range_idx * writer_stride + rank + 1
+
+
+@cute.jit
+def cta_slot() -> Int32:
+    """Row of ``mLast`` owned by this CTA.
+
+    The host sizes ``mLast`` with the CTA count that caps the persistent grid,
+    so every grid x index is a valid row.
+    """
+    return cute.arch.block_idx()[0]
+
+
+@cute.jit
 def tile_blocks(
     range_start: Int32,
     range_end: Int32,
@@ -99,11 +120,7 @@ def dq_pair_prev_k_tile_on_block(
             not use_per_range_mask
             and not block_info.is_causal
             and not block_info.is_local
-        ):
-            prev_n = (
-                cutlass.min(n_limit, cute.ceil_div(seqlen_k, block_info.tile_n)) - 1
-            )
-        elif const_expr(use_per_range_mask) and attn_type == MT_MAP.full:
+        ) or (const_expr(use_per_range_mask) and attn_type == MT_MAP.full):
             prev_n = (
                 cutlass.min(n_limit, cute.ceil_div(seqlen_k, block_info.tile_n)) - 1
             )
@@ -142,9 +159,7 @@ def dkv_pair_k_tile_is_active(
             not use_per_range_mask
             and not block_info.is_causal
             and not block_info.is_local
-        ):
-            active = cutlass.Boolean(True)
-        elif const_expr(use_per_range_mask) and attn_type == MT_MAP.full:
+        ) or (const_expr(use_per_range_mask) and attn_type == MT_MAP.full):
             active = cutlass.Boolean(True)
         else:
             m_lo, m_hi = pair_m_bounds(
@@ -221,7 +236,7 @@ def fold_fwd_last(
         start = mQRanges[r, 0] * rows_per_token
         end = mQRanges[r, 1] * rows_per_token
         if end > start:
-            writer = r + 1
+            writer = writer_number(r, Int32(1), Int32(0))
             b = start // block_size + b_offset
             last_b = (end - 1) // block_size
             while b <= last_b:
@@ -290,7 +305,7 @@ def fold_dq_last(
                             use_per_range_mask,
                         )
                         if prev_n >= 0:
-                            writer = r * writer_stride + prev_n + 1
+                            writer = writer_number(r, writer_stride, prev_n)
                             red_max_relaxed_cta(elem_pointer(mLast, (slot, b)), writer)
                         b += b_stride
                 row += 1
@@ -322,7 +337,7 @@ def fold_dkv_last(
         seqlen_k = k_e - k_s
         seqlen_q = mQRanges[r, 1] - mQRanges[r, 0]
         if seqlen_k > 0 and seqlen_q > 0:
-            writer = (r + 1) * writer_stride
+            writer = writer_number(r, writer_stride, writer_stride - 1)
             kb = k_s // block_rows
             last_kb = (k_e - 1) // block_rows
             attn_r = Int32(MT_MAP.full)

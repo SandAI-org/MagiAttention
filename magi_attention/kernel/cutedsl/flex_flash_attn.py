@@ -511,13 +511,16 @@ def _flex_flash_attn_fwd(
         assert (
             max_seqlen_q >= _q_max
         ), f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
+    # SM count of the launch device. The persistent grid cap and the per-CTA
+    # last-writer rows both derive from this one query.
+    num_sm = torch.cuda.get_device_properties(device).multi_processor_count
     if fwd_deterministic:
         tile_heads = num_head_kv if pack_gqa else num_head
         tile_rows = max_seqlen_q * (qhead_per_kvhead if pack_gqa else 1)
         validate_range_deterministic(
             head_dim=head_dim,
             head_dim_v=head_dim_v,
-            num_sm=torch.cuda.get_device_properties(q.device).multi_processor_count,
+            num_sm=num_sm,
             cluster_size=1,
             max_tickets=batch_size * tile_heads * ((tile_rows + tile_m - 1) // tile_m),
             max_writer=batch_size,
@@ -603,10 +606,13 @@ def _flex_flash_attn_fwd(
         is_split_kv=False,
     ):
         validate_persistent_grid(
-            num_sm=torch.cuda.get_device_properties(device).multi_processor_count,
+            num_sm=num_sm,
             sm_margin=sm_margin,
             cluster_size=2 if use_2cta_instrs else 1,
         )
+    # CTA cap of the persistent grid; the kernel indexes the per-CTA
+    # last-writer rows with the grid x index, so they hold this many rows.
+    max_grid_ctas = num_sm - sm_margin if ranges_persistent else None
     use_clc_scheduler = (
         requested_use_clc_scheduler
         and not is_varlen_mha
@@ -652,16 +658,12 @@ def _flex_flash_attn_fwd(
         num_lock_blocks = (lock_rows + tile_m - 1) // tile_m + 1
         lock_heads = num_head_kv if pack_gqa else num_head
         if fwd_deterministic:
-            assert q_ranges is not None
+            assert q_ranges is not None and max_grid_ctas is not None
             write_order = torch.zeros(
                 num_lock_blocks, lock_heads, 2, dtype=torch.int32, device=device
             )
-            num_cta = (
-                torch.cuda.get_device_properties(device).multi_processor_count
-                - sm_margin
-            )
             write_last = torch.zeros(
-                num_cta, num_lock_blocks, dtype=torch.int32, device=device
+                max_grid_ctas, num_lock_blocks, dtype=torch.int32, device=device
             )
         else:
             range_locks = torch.zeros(
@@ -886,7 +888,9 @@ def _flex_flash_attn_fwd(
                 if num_groups is not None
                 else None
             )
-            compile_args.append(Int32(sm_margin) if ranges_persistent else None)
+            compile_args.append(
+                Int32(max_grid_ctas) if max_grid_ctas is not None else None
+            )
             compile_args.append(
                 to_cute_tensor(tile_counter, assumed_align=4, leading_dim=0)
                 if tile_counter is not None
@@ -945,7 +949,7 @@ def _flex_flash_attn_fwd(
         call_args.append(max_seqlen_q)
         call_args.append(cu_batches)
         call_args.append(num_groups)
-        call_args.append(sm_margin if ranges_persistent else None)
+        call_args.append(max_grid_ctas)
         call_args.append(tile_counter)
         call_args.append(max_logits)
         call_args.append(softcap)
@@ -1354,6 +1358,9 @@ def _flex_flash_attn_bwd(
     )
 
     range_deterministic = deterministic and has_ranges
+    # SM count of the launch device. The persistent grid cap and the per-CTA
+    # last-writer rows both derive from this one query.
+    num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
     dq_writer_stride: int | None = None
     if range_deterministic:
         if major_arch not in (10, 11):
@@ -1362,14 +1369,13 @@ def _flex_flash_attn_bwd(
             raise NotImplementedError(
                 "deterministic q/k ranges cannot be combined with block sparsity"
             )
-        dkv_writer_stride = 1 if gqa_fold.covers_all_qheads else gqa_fold.kv_group
+        dkv_writer_stride = gqa_fold.dkv_writer_stride
         cluster_tile_k = n_block_size * cluster_size
         max_k_tiles = (seqlen_k + cluster_tile_k - 1) // cluster_tile_k
         if not use_dense_dqacc_for_ranges:
             dq_writer_stride = max_k_tiles
         dq_max_writer = 0 if use_dense_dqacc_for_ranges else batch_size * max_k_tiles
         dkv_max_writer = 0 if direct_dkv else batch_size * dkv_writer_stride
-        num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
         validate_range_deterministic(
             head_dim=head_dim,
             head_dim_v=head_dim_v,
@@ -1383,10 +1389,13 @@ def _flex_flash_attn_bwd(
     bwd_persistent = sm_margin > 0 or range_deterministic
     if bwd_persistent:
         validate_persistent_grid(
-            num_sm=torch.cuda.get_device_properties(q.device).multi_processor_count,
+            num_sm=num_sm,
             sm_margin=sm_margin,
             cluster_size=cluster_size,
         )
+    # CTA cap of the persistent grid; the kernel indexes the per-CTA
+    # last-writer rows with the grid x index, so they hold this many rows.
+    max_grid_ctas = num_sm - sm_margin if bwd_persistent else None
 
     if score_mod is not None:
         assert (
@@ -1640,23 +1649,25 @@ def _flex_flash_attn_bwd(
             q_ranges is not None
             and k_ranges is not None
             and dq_writer_stride is not None
+            and max_grid_ctas is not None
         )
         num_q_blocks = (total_q + m_block_size - 1) // m_block_size + 1
         dq_write_order = torch.zeros(
             num_q_blocks, num_head, 2, dtype=torch.int32, device=device
         )
         dq_last = torch.zeros(
-            num_sm - sm_margin, num_q_blocks, dtype=torch.int32, device=device
+            max_grid_ctas, num_q_blocks, dtype=torch.int32, device=device
         )
     dkv_write_order = dkv_last = None
     if range_deterministic and not direct_dkv:
         assert q_ranges is not None and k_ranges is not None
+        assert max_grid_ctas is not None
         num_k_blocks = (total_k + cluster_tile_k - 1) // cluster_tile_k + 1
         dkv_write_order = torch.zeros(
             num_k_blocks, num_head_kv, 2, dtype=torch.int32, device=device
         )
         dkv_last = torch.zeros(
-            num_sm - sm_margin, num_k_blocks, dtype=torch.int32, device=device
+            max_grid_ctas, num_k_blocks, dtype=torch.int32, device=device
         )
 
     # The DYNAMIC schedule's tile counter.
@@ -1991,7 +2002,9 @@ def _flex_flash_attn_bwd(
             )
             # Runtime scalar: the compiled variant stays max_seqlen_k-agnostic.
             bwd_compile_args.append(Int32(seqlen_k))
-            bwd_compile_args.append(Int32(sm_margin) if bwd_persistent else None)
+            bwd_compile_args.append(
+                Int32(max_grid_ctas) if max_grid_ctas is not None else None
+            )
             bwd_compile_args.append(
                 to_cute_tensor(tile_counter, assumed_align=4, leading_dim=0)
                 if tile_counter is not None
@@ -2050,7 +2063,7 @@ def _flex_flash_attn_bwd(
         bwd_call_args.append(cu_batches)
         bwd_call_args.append(num_groups)
         bwd_call_args.append(seqlen_k)
-        bwd_call_args.append(sm_margin if bwd_persistent else None)
+        bwd_call_args.append(max_grid_ctas)
         bwd_call_args.append(tile_counter)
         bwd_call_args.append(softcap_value)
         bwd_call_args.append(dq_write_order)
@@ -2442,8 +2455,8 @@ def flex_flash_attn_func(
         forward skips the atomic O merge; backward derives the dual K-merge.
         SM100/SM110 only; requires both ``disable_*_atomic_reduction``
         contracts. ``True`` builds the merge tables on device in every call
-        without host synchronization (CUDA-graph capturable); pass a
-        precomputed plan to reuse the tables across calls.
+        without host synchronization (CUDA-graph capturable); pass a plan
+        from :func:`plan_range_merge` to reuse the tables across calls.
 
     out_dtype: dtype of the returned O, fp32/fp16/bf16. None returns the input
         dtype. A dtype other than the input dtype requires SM100/SM110. With

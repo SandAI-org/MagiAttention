@@ -297,7 +297,8 @@ class TileSchedulerProtocol(Protocol):
     def producer_tail(self, *, loc=None, ip=None) -> None:
         """Producer-side cleanup after the last tile.
 
-        No-op for static schedulers. For CLC / DYNAMIC schedulers: pipeline producer_tail.
+        No-op for static schedulers. For CLC schedulers: pipeline producer_tail.
+        DYNAMIC schedulers run it at the end of ``run_dynamic_producer``.
         """
         ...
 
@@ -322,8 +323,9 @@ class TileSchedulerArguments(ParamsBase):
     qhead_per_kvhead_packgqa: cutlass.Constexpr[int] = 1
     element_size: cutlass.Constexpr[int] = 2
     is_persistent: cutlass.Constexpr[bool] = False
-    # Runtime SM reservation for persistent varlen scheduling.
-    sm_margin: Optional[Int32] = None
+    # Runtime CTA cap of a persistent varlen grid: the SM count of the launch
+    # device minus the SM reservation.
+    max_grid_ctas: Optional[Int32] = None
     lpt: cutlass.Constexpr[bool] = False
     is_split_kv: cutlass.Constexpr[bool] = False
     head_swizzle: cutlass.Constexpr[bool] = False
@@ -999,7 +1001,7 @@ class SingleTileVarlenScheduler:
         cluster_shape_m: cutlass.Constexpr[int] = 1
         use_cluster_idx: cutlass.Constexpr[bool] = False
         scheduling_mode: cutlass.Constexpr[SchedulingMode] = SchedulingMode.STATIC
-        sm_margin: Optional[Int32] = None
+        max_grid_ctas: Optional[Int32] = None
         mTileCounter: Optional[cute.Tensor] = None
         claim_first_tile: cutlass.Constexpr[bool] = False
 
@@ -1024,8 +1026,8 @@ class SingleTileVarlenScheduler:
                 args.mTileCounter is not None
             ), "the DYNAMIC schedule and its tile counter come together"
             assert (
-                not args.is_persistent or args.sm_margin is not None
-            ), "a persistent varlen grid is sized by its SM reservation"
+                not args.is_persistent or args.max_grid_ctas is not None
+            ), "a persistent varlen grid is sized by its CTA cap"
             assert (
                 not args.claim_first_tile or scheduling_mode == SchedulingMode.DYNAMIC
             ), "only the DYNAMIC schedule claims tiles from a counter"
@@ -1079,7 +1081,7 @@ class SingleTileVarlenScheduler:
                 cluster_shape_m=args.cluster_shape_mn[0],
                 use_cluster_idx=args.use_cluster_idx,
                 scheduling_mode=scheduling_mode,
-                sm_margin=args.sm_margin,
+                max_grid_ctas=args.max_grid_ctas,
                 mTileCounter=args.mTileCounter,
                 claim_first_tile=args.claim_first_tile,
             )
@@ -1183,9 +1185,10 @@ class SingleTileVarlenScheduler:
                     params.num_batch,
                 )
         else:
+            # Int64: the per-range padding can exceed Int32 before the CTA cap.
             total_blocks_max = (
-                params.total_q
-                + params.num_batch
+                cutlass.Int64(params.total_q)
+                + cutlass.Int64(params.num_batch)
                 * (params.cluster_shape_m * params.tile_shape_mn[0] - 1)
             ) // params.tile_shape_mn[0]
             # Round down to nearest multiple of cluster since odd excess is always padding.
@@ -1194,13 +1197,12 @@ class SingleTileVarlenScheduler:
             )
             bound = total_blocks_max * params.num_head
         if cutlass.const_expr(params.scheduling_mode == SchedulingMode.DYNAMIC):
-            assert params.sm_margin is not None
-            sm_count = HardwareInfo().get_device_multiprocessor_count()
+            assert params.max_grid_ctas is not None
             max_ctas = (
-                (sm_count - params.sm_margin) // params.cluster_shape_m
+                params.max_grid_ctas // params.cluster_shape_m
             ) * params.cluster_shape_m
             bound = cutlass.min(bound, max_ctas)
-        return (bound, params.num_splits, Int32(1))
+        return (Int32(bound), params.num_splits, Int32(1))
 
     @staticmethod
     def is_grid3d(params: Params) -> bool:
@@ -1534,6 +1536,9 @@ class SingleTileVarlenScheduler:
     def initial_work_tile_info(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
             assert self.dynamic is not None  # mypy
+            # Every warp-role region walks the tiles from slot 0, phase 0, and
+            # all regions share this scheduler object. The reset gives the
+            # cursors values defined in this region.
             self.dynamic.reset_consumer(loc=loc, ip=ip)
             self.dynamic.reset_producer(loc=loc, ip=ip)
             if const_expr(self.params.claim_first_tile):
@@ -1565,6 +1570,8 @@ class SingleTileVarlenScheduler:
         params = sched.params
         num_batch = SingleTileVarlenScheduler.device_num_batch(params)
         lane_idx = cute.arch.lane_idx()
+        # The scheduler warp is its own warp-role region: it starts both
+        # cursors at slot 0, phase 0 with values defined in this region.
         sched.dynamic.reset_producer(loc=loc, ip=ip)
         sched.dynamic.reset_consumer(loc=loc, ip=ip)
 
@@ -1624,9 +1631,6 @@ class SingleTileVarlenScheduler:
     def producer_tail(self, *, loc=None, ip=None):
         if const_expr(self.params.scheduling_mode == SchedulingMode.CLC):
             self.clc.producer_tail(loc=loc, ip=ip)
-        elif const_expr(self.params.scheduling_mode == SchedulingMode.DYNAMIC):
-            assert self.dynamic is not None  # mypy
-            self.dynamic.producer_tail(loc=loc, ip=ip)
 
     def _mlir_objs(self) -> list:
         objs = [

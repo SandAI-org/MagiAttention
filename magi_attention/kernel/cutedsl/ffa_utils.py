@@ -300,6 +300,13 @@ class BwdGqaFold:
         dK/dV have a single writer per (K tile, kv head)."""
         return self.kv_group == 1 or self.head_loop
 
+    @property
+    def dkv_writer_stride(self) -> int:
+        """dK/dV writers of one range per (K tile, kv head): one per scratch
+        head, or a single one when a tile covers every q head. The range write
+        order numbers the writers of a range with this stride."""
+        return 1 if self.covers_all_qheads else self.kv_group
+
 
 def select_bwd_gqa_fold(
     *,

@@ -44,7 +44,7 @@ from magi_attention.utils.version import is_cutedsl_version_ge
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
-from . import range_write_index, range_write_order, sm100_utils
+from . import range_last_writer, range_write_order, sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
@@ -784,7 +784,9 @@ class FFAFwdSm100:
         max_seqlen_q: Int32 | None = None,
         mCuBatches: Optional[cute.Tensor] = None,  # [R + 1] CSR offsets for RangeMerge
         mNumBatches: Optional[cute.Tensor] = None,  # [1] int32 active group count G
-        sm_margin: Int32 | None = None,
+        # CTA cap of the persistent range grid: the SM count of the launch
+        # device minus the SM reservation.
+        max_grid_ctas: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
         mTileCounter: Optional[cute.Tensor] = None,
         # [num_head_q] fp32, max softmax logit per q head, merged in with an
@@ -1299,7 +1301,7 @@ class FFAFwdSm100:
             else 1,
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
-            sm_margin=sm_margin,
+            max_grid_ctas=max_grid_ctas,
             lpt=self.maybe_causal or self.is_local,
             is_split_kv=self.is_split_kv,
             cluster_shape_mn=self.cluster_shape_mn,
@@ -2223,7 +2225,7 @@ class FFAFwdSm100:
             if warp_idx == self.clc_scheduler_warp_id:
                 cute.arch.setmaxregister_decrease(self.num_regs_other)
                 if is_leader_cta:
-                    self.clc_scheduler_warp(tile_scheduler)
+                    self.scheduler_warp(tile_scheduler)
                 else:
                     self.empty_warp(tile_scheduler)
             for i in cutlass.range_constexpr(len(self.empty_warp_ids)):
@@ -4562,7 +4564,7 @@ class FFAFwdSm100:
         sm_stats_consumer_phase = Int32(0)
         o_corr_consumer_phase = Int32(0)
         corr_epi_producer_phase = Int32(1)
-        fwd_slot = cute.arch.block_idx()[0]
+        fwd_slot = range_last_writer.cta_slot()
         fwd_folded = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
@@ -4578,7 +4580,7 @@ class FFAFwdSm100:
             if const_expr(self.deterministic):
                 assert mQRanges is not None and mLast is not None
                 if fwd_folded < batch_idx:
-                    range_write_index.fold_fwd_last(
+                    range_last_writer.fold_fwd_last(
                         mQRanges,
                         mLast,
                         fwd_slot,
@@ -5038,27 +5040,20 @@ class FFAFwdSm100:
                                 assert mWriteOrder is not None
                                 assert mLast is not None
                                 if tidx == 0:
-                                    range_write_order.wait_published(
+                                    (
+                                        pred_left,
+                                        pred_right,
+                                    ) = range_write_order.last_writers(
+                                        mLast, fwd_slot, left_block, right_block
+                                    )
+                                    range_write_order.wait_published_blocks(
                                         mWriteOrder,
                                         left_block,
+                                        right_block,
                                         head_idx,
-                                        cutedsl_utils.ld_acquire_cta(
-                                            cutedsl_utils.elem_pointer(
-                                                mLast, (fwd_slot, left_block)
-                                            )
-                                        ),
+                                        pred_left,
+                                        pred_right,
                                     )
-                                    if right_block != left_block:
-                                        range_write_order.wait_published(
-                                            mWriteOrder,
-                                            right_block,
-                                            head_idx,
-                                            cutedsl_utils.ld_acquire_cta(
-                                                cutedsl_utils.elem_pointer(
-                                                    mLast, (fwd_slot, right_block)
-                                                )
-                                            ),
-                                        )
                             elif tidx == 0:
                                 assert mRangeLocks is not None
                                 self._acquire_range_locks(
@@ -5139,21 +5134,18 @@ class FFAFwdSm100:
                             if tidx == 0:
                                 if const_expr(self.deterministic):
                                     assert mWriteOrder is not None
-                                    range_write_order.arrive(
+                                    range_write_order.arrive_blocks(
                                         mWriteOrder,
                                         left_block,
+                                        right_block,
                                         head_idx,
-                                        batch_idx + 1,
+                                        range_last_writer.writer_number(
+                                            batch_idx, Int32(1), Int32(0)
+                                        ),
                                         left_weight,
+                                        right_weight,
+                                        1,
                                     )
-                                    if right_block != left_block:
-                                        range_write_order.arrive(
-                                            mWriteOrder,
-                                            right_block,
-                                            head_idx,
-                                            batch_idx + 1,
-                                            right_weight,
-                                        )
                                 else:
                                     assert mRangeLocks is not None
                                     self._release_range_locks(
@@ -6066,10 +6058,12 @@ class FFAFwdSm100:
             work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
-    def clc_scheduler_warp(
+    def scheduler_warp(
         self,
         tile_scheduler: TileSchedulerProtocol,
     ):
+        """Publish the tiles of the cluster: the DYNAMIC producer loop, or one
+        CLC query ahead of each tile."""
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////

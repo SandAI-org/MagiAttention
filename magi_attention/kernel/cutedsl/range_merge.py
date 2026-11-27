@@ -38,7 +38,13 @@ __all__ = [
 
 @dataclass(frozen=True)
 class RangeMergePlan:
-    """Precomputed merge tables for RangeMerge."""
+    """Precomputed merge tables for RangeMerge.
+
+    Build plans with :func:`plan_range_merge` or :func:`plan_range_merge_bwd`.
+    The fields are derived from each other (group launch order, start-ordered
+    groups, active group count), so constructing the dataclass directly is not
+    a supported interface and its field order is not stable.
+    """
 
     merged_outer_ranges: torch.Tensor  # [R, 2], pad [0, 0]
     sorted_inner_ranges: torch.Tensor  # [R, 2], group-contiguous
