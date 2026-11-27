@@ -141,15 +141,17 @@ def delay_injection(point: DelayPoint, seed: int, max_ns: int) -> Iterator[None]
     stack = ExitStack()
     stack.enter_context(fresh_compile_caches())
     if point is DelayPoint.START:
-        claim_first = SingleTileVarlenScheduler.claim_first_work
+        run_producer = SingleTileVarlenScheduler.run_dynamic_producer
 
-        def delayed_claim_first(self, *, loc=None, ip=None):
+        def delayed_run_producer(self, *, loc=None, ip=None):
             launch_order_sleep(max_ns, loc=loc, ip=ip)
-            claim_first(self, loc=loc, ip=ip)
+            run_producer.__get__(self, type(self))(loc=loc, ip=ip)
 
         stack.enter_context(
             mock.patch.object(
-                SingleTileVarlenScheduler, "claim_first_work", delayed_claim_first
+                SingleTileVarlenScheduler,
+                "run_dynamic_producer",
+                delayed_run_producer,
             )
         )
     elif point is DelayPoint.PAIR_ARRIVE:

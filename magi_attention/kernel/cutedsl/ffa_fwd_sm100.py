@@ -783,7 +783,7 @@ class FFAFwdSm100:
         mRangeLocks: Optional[cute.Tensor] = None,
         max_seqlen_q: Int32 | None = None,
         mCuBatches: Optional[cute.Tensor] = None,  # [R + 1] CSR offsets for RangeMerge
-        mNumBatches: Optional[cute.Tensor] = None,
+        mNumBatches: Optional[cute.Tensor] = None,  # [1] int32 active group count G
         sm_margin: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
         mTileCounter: Optional[cute.Tensor] = None,
@@ -6075,15 +6075,16 @@ class FFAFwdSm100:
         # /////////////////////////////////////////////////////////////////////////////
         if const_expr(not self.use_clc_scheduler):
             assert isinstance(tile_scheduler, SingleTileVarlenScheduler)
-            tile_scheduler.claim_first_work()
-        work_tile = tile_scheduler.initial_work_tile_info()
-        while work_tile.is_valid_tile:
-            tile_scheduler.prefetch_next_work()
+            tile_scheduler.run_dynamic_producer()
+        else:
+            work_tile = tile_scheduler.initial_work_tile_info()
+            while work_tile.is_valid_tile:
+                tile_scheduler.prefetch_next_work()
 
-            # Advance to next Q tile
-            work_tile = tile_scheduler.advance_to_next_work()
+                # Advance to next Q tile
+                work_tile = tile_scheduler.advance_to_next_work()
 
-        tile_scheduler.producer_tail()
+            tile_scheduler.producer_tail()
 
     @cute.jit
     def empty_warp(

@@ -3005,12 +3005,7 @@ class FFABwdSm100:
     @cute.jit
     def scheduler_warp(self, tile_scheduler: SingleTileVarlenScheduler):
         """DYNAMIC producer: publish each tile ahead of the one being processed."""
-        tile_scheduler.claim_first_work()
-        work_tile = tile_scheduler.initial_work_tile_info()
-        while work_tile.is_valid_tile:
-            tile_scheduler.prefetch_next_work()
-            work_tile = tile_scheduler.advance_to_next_work()
-        tile_scheduler.producer_tail()
+        tile_scheduler.run_dynamic_producer()
 
     @cute.jit
     def consume_schedule_only(self, tile_scheduler: TileSchedulerProtocol):
