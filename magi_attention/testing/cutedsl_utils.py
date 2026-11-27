@@ -109,6 +109,17 @@ def seed_test_case(test_case: str) -> None:
 
 
 @contextmanager
+def sync_debug_error() -> Iterator[None]:
+    """Fail immediately on any implicit CPU-GPU synchronization inside the block."""
+    prev_mode = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        yield
+    finally:
+        torch.cuda.set_sync_debug_mode(prev_mode)
+
+
+@contextmanager
 def record_fwd_kernels() -> Iterator[list[FFAFwdSm100]]:
     """Record the SM100 fwd kernel objects built within the context under an
     empty fwd compile cache, as :func:`record_bwd_kernels` does for the bwd."""
@@ -242,12 +253,53 @@ def _torch_reference(
         softcap=softcap,
         softmax_scale=softmax_scale,
         layout="thd",
-        # The sdpa reference supports neither sink nor softcap.
-        backend="sdpa" if sink is None and softcap == 0.0 else "torch",
+        # The sdpa reference handles neither sink/softcap nor all-masked Q rows.
+        backend=(
+            "sdpa"
+            if sink is None and softcap == 0.0 and bool(mask.any(dim=-1).all())
+            else "torch"
+        ),
         high_precision=high_precision,
     )
     grads = torch.autograd.grad(out, (q_ref, k_ref, v_ref), do.to(out.dtype))
     return AttnTensors(out, *grads)
+
+
+def assert_sequence_equal(
+    got: Sequence[torch.Tensor],
+    want: Sequence[torch.Tensor],
+    names: Sequence[str],
+    test_case: str = "",
+) -> None:
+    """Assert pairwise bitwise equality for named tensors."""
+    for g, w, name in zip(got, want, names, strict=True):
+        assert_equal(
+            g,
+            w,
+            test_case=f"{test_case} => {name}",
+            print_rank=-1,
+            print_no_mismatch=False,
+        )
+
+
+def assert_sequence_close(
+    got: Sequence[torch.Tensor],
+    want: Sequence[torch.Tensor],
+    names: Sequence[str],
+    tol: float,
+    test_case: str = "",
+) -> None:
+    """Assert pairwise fp32 closeness within ``tol`` for named tensors."""
+    for g, w, name in zip(got, want, names, strict=True):
+        assert_close(
+            g.float(),
+            w.float(),
+            atol=tol,
+            rtol=tol,
+            test_case=f"{test_case} => {name}",
+            print_rank=-1,
+            print_no_mismatch=False,
+        )
 
 
 def _check_one(

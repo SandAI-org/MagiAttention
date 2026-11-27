@@ -14,13 +14,11 @@
 
 import math
 import unittest
-from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Iterator, Sequence
+from typing import TYPE_CHECKING, Callable, Sequence
 from unittest import TestCase
 
 import torch
-import torch.utils.deterministic
 from torch.testing._internal.common_utils import run_tests
 
 from magi_attention.kernel.cutedsl import flex_flash_attn_func
@@ -37,12 +35,15 @@ from magi_attention.testing.cutedsl_utils import (
     HeadConfig,
     Relations,
     assert_cuda_graph_matches_eager,
+    assert_sequence_close,
+    assert_sequence_equal,
     is_sm100_family,
     make_qkv,
     overlapping_relations,
     record_bwd_kernels,
     record_fwd_kernels,
     seed_test_case,
+    sync_debug_error,
     to_ranges_tensor,
 )
 from magi_attention.testing.dist_common import with_run_in_mp
@@ -58,6 +59,9 @@ _LSE_TOL = 1e-3
 _GRAD_TOL = 3e-2
 _ALL_MASKS = (MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal)
 _MANY_RANGES = 212
+_OUT_LSE_NAMES = ("out", "lse")
+_GRAD_NAMES = ("dq", "dk", "dv")
+_PUBLIC_API_NAMES = ("out", "lse", "dq", "dk", "dv", "dsink")
 
 
 @dataclass(frozen=True)
@@ -65,7 +69,6 @@ class _FwdCase:
     group: int = 2
     out_dtype: torch.dtype = torch.float32
     pack_gqa: bool = False
-    tol: float = _TOL
 
 
 @dataclass(frozen=True)
@@ -128,61 +131,19 @@ def _with_2cta(enabled: bool) -> switch_env:
 # ---------------------------------------------------------------------------
 
 
-def _assert_out_lse_bitwise(got, want, test_case: str) -> None:
-    assert_equal(
-        got[0],
-        want[0],
-        test_case=f"{test_case} => out",
-        print_rank=-1,
-        print_no_mismatch=False,
-    )
-    assert_equal(
-        got[1],
-        want[1],
-        test_case=f"{test_case} => lse",
-        print_rank=-1,
-        print_no_mismatch=False,
-    )
-
-
-def _assert_grads_bitwise(got, want, test_case: str) -> None:
-    assert_equal(
-        got[0],
-        want[0],
-        test_case=f"{test_case} => dq",
-        print_rank=-1,
-        print_no_mismatch=False,
-    )
-    assert_equal(
-        got[1],
-        want[1],
-        test_case=f"{test_case} => dk",
-        print_rank=-1,
-        print_no_mismatch=False,
-    )
-    assert_equal(
-        got[2],
-        want[2],
-        test_case=f"{test_case} => dv",
-        print_rank=-1,
-        print_no_mismatch=False,
-    )
-
-
 def _assert_fwd_close(
     out: torch.Tensor,
     lse: torch.Tensor,
     out_ref: torch.Tensor,
     lse_ref: torch.Tensor,
     *,
-    tol: float = _TOL,
     test_case: str = "",
 ) -> None:
     assert_close(
         out.float(),
         out_ref.float(),
-        atol=tol,
-        rtol=tol,
+        atol=_TOL,
+        rtol=_TOL,
         test_case=f"{test_case} => out",
         print_rank=-1,
         print_no_mismatch=False,
@@ -209,79 +170,23 @@ def _assert_fwd_close(
     )
 
 
-def _assert_grads_close(
-    grads: Sequence[torch.Tensor], want: Sequence[torch.Tensor], test_case: str = ""
-) -> None:
-    assert_close(
-        grads[0].float(),
-        want[0].float(),
-        atol=_GRAD_TOL,
-        rtol=_GRAD_TOL,
-        test_case=f"{test_case} => dq",
-        print_rank=-1,
-        print_no_mismatch=False,
-    )
-    assert_close(
-        grads[1].float(),
-        want[1].float(),
-        atol=_GRAD_TOL,
-        rtol=_GRAD_TOL,
-        test_case=f"{test_case} => dk",
-        print_rank=-1,
-        print_no_mismatch=False,
-    )
-    assert_close(
-        grads[2].float(),
-        want[2].float(),
-        atol=_GRAD_TOL,
-        rtol=_GRAD_TOL,
-        test_case=f"{test_case} => dv",
-        print_rank=-1,
-        print_no_mismatch=False,
-    )
-
-
 def _bitwise_across_margins(
     run: Callable[[int], Sequence[torch.Tensor]],
     margins: tuple[int, int, int],
-    check: Callable[[Sequence[torch.Tensor], Sequence[torch.Tensor], str], None],
+    names: Sequence[str],
     test_case: str,
 ) -> Sequence[torch.Tensor]:
     """One kernel invocation per margin, straight-line: rerun at the base
     margin, plus the two other scheduler budgets, all bitwise identical."""
     base = run(margins[0])
-    check(run(margins[0]), base, f"{test_case}[rerun]")
-    check(run(margins[1]), base, f"{test_case}[margin={margins[1]}]")
-    check(run(margins[2]), base, f"{test_case}[margin={margins[2]}]")
+    assert_sequence_equal(run(margins[0]), base, names, f"{test_case}[rerun]")
+    assert_sequence_equal(
+        run(margins[1]), base, names, f"{test_case}[margin={margins[1]}]"
+    )
+    assert_sequence_equal(
+        run(margins[2]), base, names, f"{test_case}[margin={margins[2]}]"
+    )
     return base
-
-
-@contextmanager
-def _nan_filled_allocations() -> Iterator[None]:
-    """While deterministic algorithms are enabled, torch fills uninitialized
-    floating-point memory (``torch.empty*``, ``new_empty``) with NaN, so an
-    output row the backend never writes reads back NaN. ``warn_only`` keeps
-    torch ops without a deterministic implementation from raising."""
-    prev_enabled = torch.are_deterministic_algorithms_enabled()
-    prev_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-    prev_fill = torch.utils.deterministic.fill_uninitialized_memory
-    torch.utils.deterministic.fill_uninitialized_memory = True
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    try:
-        yield
-    finally:
-        torch.use_deterministic_algorithms(prev_enabled, warn_only=prev_warn_only)
-        torch.utils.deterministic.fill_uninitialized_memory = prev_fill
-
-
-@contextmanager
-def _sync_debug_error() -> Iterator[None]:
-    prev_mode = torch.cuda.get_sync_debug_mode()
-    torch.cuda.set_sync_debug_mode("error")
-    try:
-        yield
-    finally:
-        torch.cuda.set_sync_debug_mode(prev_mode)
 
 
 def _relations_mask(
@@ -368,23 +273,6 @@ def _shared_k_relations() -> tuple[Relations, int, int]:
     )
 
 
-def _merged_q_relations() -> tuple[Relations, int, int]:
-    return (
-        [
-            ([131, 600], [100, 400], MT_MAP.full),
-            ([0, 131], [0, 300], MT_MAP.full),
-            ([601, 1000], [900, 1200], MT_MAP.causal),
-            ([0, 131], [300, 500], MT_MAP.causal),
-            ([600, 601], [0, 50], MT_MAP.full),
-            ([131, 600], [600, 900], MT_MAP.inv_causal),
-            ([0, 131], [530, 530], MT_MAP.full),
-            ([0, 131], [500, 530], MT_MAP.full),
-        ],
-        1000,
-        1200,
-    )
-
-
 def _merged_k_relations() -> tuple[Relations, int, int]:
     return (
         [
@@ -405,90 +293,35 @@ def _merged_k_relations() -> tuple[Relations, int, int]:
     )
 
 
-def _merged_k_relations_heavy_middle() -> tuple[Relations, int, int]:
-    """The K groups of ``_merged_k_relations`` with [557, 700) moved to
-    [580, 700), leaving K rows [557, 580) and [1000, 1100) uncovered, and four
-    more pairs on [300, 557), so that group launches before the lighter
-    [0, 300) group and launch order differs from K start order."""
-    return (
-        [
-            ([600, 700], [300, 557], MT_MAP.causal),
-            ([5, 305], [0, 300], MT_MAP.causal),
-            ([0, 143], [580, 700], MT_MAP.full),
-            ([1, 301], [700, 1000], MT_MAP.causal),
-            ([4, 304], [0, 300], MT_MAP.inv_causal),
-            ([0, 200], [1000, 1000], MT_MAP.full),
-            ([100, 357], [300, 557], MT_MAP.full),
-            ([50, 50], [580, 700], MT_MAP.full),
-            ([0, 300], [700, 1000], MT_MAP.inv_causal),
-            ([400, 450], [0, 300], MT_MAP.full),
-            ([250, 600], [580, 700], MT_MAP.inv_causal),
-            ([0, 50], [300, 557], MT_MAP.full),
-            ([50, 100], [300, 557], MT_MAP.full),
-            ([357, 480], [300, 557], MT_MAP.full),
-            ([480, 600], [300, 557], MT_MAP.full),
-        ],
-        700,
-        1100,
-    )
-
-
 def _merged_k_relations_2cta_adjacent() -> tuple[Relations, int, int]:
     """Eight K groups of 160 rows after a full [0, 256) relation. Each group
     holds four 128-row pairs whose starts are 64 apart, so adjacent pairs of a
     group share a Q block; masks are inv_causal, bi_causal, bi_causal, causal."""
-    return (
-        [
-            ([0, 3072], [0, 256], MT_MAP.full),
-            ([0, 128], [256, 416], MT_MAP.inv_causal),
-            ([64, 192], [256, 416], MT_MAP.bi_causal),
-            ([128, 256], [256, 416], MT_MAP.bi_causal),
-            ([192, 320], [256, 416], MT_MAP.causal),
-            ([384, 512], [416, 576], MT_MAP.inv_causal),
-            ([448, 576], [416, 576], MT_MAP.bi_causal),
-            ([512, 640], [416, 576], MT_MAP.bi_causal),
-            ([576, 704], [416, 576], MT_MAP.causal),
-            ([768, 896], [576, 736], MT_MAP.inv_causal),
-            ([832, 960], [576, 736], MT_MAP.bi_causal),
-            ([896, 1024], [576, 736], MT_MAP.bi_causal),
-            ([960, 1088], [576, 736], MT_MAP.causal),
-            ([1152, 1280], [736, 896], MT_MAP.inv_causal),
-            ([1216, 1344], [736, 896], MT_MAP.bi_causal),
-            ([1280, 1408], [736, 896], MT_MAP.bi_causal),
-            ([1344, 1472], [736, 896], MT_MAP.causal),
-            ([1536, 1664], [896, 1056], MT_MAP.inv_causal),
-            ([1600, 1728], [896, 1056], MT_MAP.bi_causal),
-            ([1664, 1792], [896, 1056], MT_MAP.bi_causal),
-            ([1728, 1856], [896, 1056], MT_MAP.causal),
-            ([1920, 2048], [1056, 1216], MT_MAP.inv_causal),
-            ([1984, 2112], [1056, 1216], MT_MAP.bi_causal),
-            ([2048, 2176], [1056, 1216], MT_MAP.bi_causal),
-            ([2112, 2240], [1056, 1216], MT_MAP.causal),
-            ([2304, 2432], [1216, 1376], MT_MAP.inv_causal),
-            ([2368, 2496], [1216, 1376], MT_MAP.bi_causal),
-            ([2432, 2560], [1216, 1376], MT_MAP.bi_causal),
-            ([2496, 2624], [1216, 1376], MT_MAP.causal),
-            ([2688, 2816], [1376, 1536], MT_MAP.inv_causal),
-            ([2752, 2880], [1376, 1536], MT_MAP.bi_causal),
-            ([2816, 2944], [1376, 1536], MT_MAP.bi_causal),
-            ([2880, 3008], [1376, 1536], MT_MAP.causal),
-        ],
-        3072,
-        1536,
-    )
+    masks = (MT_MAP.inv_causal, MT_MAP.bi_causal, MT_MAP.bi_causal, MT_MAP.causal)
+    relations: Relations = [([0, 3072], [0, 256], MT_MAP.full)]
+    for g in range(8):
+        q0, k0 = g * 384, 256 + g * 160
+        for p, mask in enumerate(masks):
+            relations.append(([q0 + p * 64, q0 + p * 64 + 128], [k0, k0 + 160], mask))
+    return relations, 3072, 1536
 
 
-def _many_overlapping_q_relations(num_ranges: int) -> tuple[Relations, int, int]:
-    q_len, k_step, total_q = 48, 32, 256
-    relations: Relations = [
-        (
-            [(g * 19) % (total_q - q_len), (g * 19) % (total_q - q_len) + q_len],
-            [g * k_step, (g + 1) * k_step],
-            _ALL_MASKS[g % len(_ALL_MASKS)],
+def _many_overlapping_relations() -> tuple[Relations, int, int]:
+    """256 disjoint (qb, kb) rectangles across 16x16 unaligned bands so every
+    physical Q and K block collects more than 32 writers."""
+    bands = 16
+    relations: Relations = []
+    for g in range(bands * bands):
+        qb = g % bands
+        kb = (g // bands + qb) % bands
+        relations.append(
+            (
+                [qb * 48 + 3, qb * 48 + 47],
+                [kb * 48 + 5, kb * 48 + 49],
+                _ALL_MASKS[g % len(_ALL_MASKS)],
+            )
         )
-        for g in range(num_ranges)
-    ]
-    return relations, total_q, num_ranges * k_step + 32
+    return relations, bands * 48 + 16, bands * 48 + 16
 
 
 def _many_merged_k_relations(num_groups: int) -> tuple[Relations, int, int]:
@@ -502,19 +335,6 @@ def _many_merged_k_relations(num_groups: int) -> tuple[Relations, int, int]:
     return relations, total_q, num_groups * k_step + 32
 
 
-def _many_overlapping_k_relations(num_ranges: int) -> tuple[Relations, int, int]:
-    q_len, k_len, total_k = 16, 48, 256
-    relations: Relations = [
-        (
-            [g * q_len, (g + 1) * q_len],
-            [(g * 13) % (total_k - k_len), (g * 13) % (total_k - k_len) + k_len],
-            _ALL_MASKS[g % len(_ALL_MASKS)],
-        )
-        for g in range(num_ranges)
-    ]
-    return relations, num_ranges * q_len, total_k
-
-
 _DISJOINT_Q_RELATIONS: Relations = [
     ([3, 132], [0, 290], MT_MAP.full),
     ([140, 410], [290, 560], MT_MAP.causal),
@@ -525,24 +345,6 @@ _DISJOINT_Q_RELATIONS: Relations = [
 ]
 
 _EMPTY_KEYLESS_RELATIONS: Relations = [
-    ([1, 130], [0, 200], MT_MAP.full),
-    ([50, 50], [200, 260], MT_MAP.full),
-    ([100, 300], [260, 260], MT_MAP.full),
-    ([256, 400], [260, 500], MT_MAP.causal),
-    ([129, 130], [500, 520], MT_MAP.full),
-    ([0, 257], [520, 900], MT_MAP.full),
-]
-
-_PACKED_EMPTY_KEYLESS_RELATIONS: Relations = [
-    ([61, 200], [0, 200], MT_MAP.full),
-    ([50, 50], [200, 260], MT_MAP.full),
-    ([100, 300], [260, 260], MT_MAP.full),
-    ([64, 128], [260, 500], MT_MAP.causal),
-    ([129, 130], [500, 520], MT_MAP.full),
-    ([0, 257], [520, 900], MT_MAP.full),
-]
-
-_BWD_EMPTY_KEYLESS_RELATIONS: Relations = [
     ([1, 130], [0, 200], MT_MAP.full),
     ([50, 50], [200, 260], MT_MAP.full),
     ([100, 300], [260, 260], MT_MAP.full),
@@ -750,7 +552,9 @@ class TestFFARangeDeterministicHost(_SingleGpuDetTestBase):
                 disable_bwd_dkv_atomic_reduction=False,
                 sm_margin=self.num_sm - 2,
             )
-        _assert_grads_close(grads, prob.ref_grads(), "budget_validation")
+        assert_sequence_close(
+            grads, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, "budget_validation"
+        )
 
     def test_deterministic_path_activation(self):
         """The single whitebox check of this suite: ``deterministic=True``
@@ -790,77 +594,33 @@ class TestFFARangeDeterministicFwd(_RangeDetHelpers, CuteDSLDistTestBase):
         out, lse = _bitwise_across_margins(
             lambda m: self._det_fwd(q, k, v, relations, sm_margin=m, **kwargs),
             self._margins(),
-            _assert_out_lse_bitwise,
+            _OUT_LSE_NAMES,
             test_case,
         )
         self.assertEqual(out.dtype, case.out_dtype)
-        out_ref, lse_ref = _ref_fwd(q, k, v, relations)
-        _assert_fwd_close(out, lse, out_ref, lse_ref, tol=case.tol, test_case=test_case)
-
-    @with_run_in_mp
-    @parameterize(
-        "case",
-        [
-            _FwdCase(group=1, out_dtype=torch.float32),
-            _FwdCase(group=2, out_dtype=torch.bfloat16, tol=2 * _TOL),
-        ],
-    )
-    def test_fwd_range_merge_bitwise_across_margins(self, case: _FwdCase):
-        test_case = f"[fwd_range_merge][{case}]"
-        seed_test_case(test_case)
-        relations, total_q, total_k = _merged_q_relations()
-        q, k, v = self._qkv(total_q, total_k, case.group)
-        args = self._range_args(relations)
-
-        def merge_fwd(sm_margin: int):
-            return _flex_flash_attn_fwd(
-                q,
-                k,
-                v,
-                **args,
-                disable_fwd_atomic_reduction=True,
-                range_merge=True,
-                deterministic=True,
-                out_dtype=case.out_dtype,
-                sm_margin=sm_margin,
-            )
-
-        out, lse = _bitwise_across_margins(
-            merge_fwd, self._margins(), _assert_out_lse_bitwise, test_case
-        )
-        self.assertEqual(out.dtype, case.out_dtype)
-        out_ref, lse_ref = _ref_fwd(q, k, v, relations)
-        _assert_fwd_close(out, lse, out_ref, lse_ref, tol=case.tol, test_case=test_case)
-
-
-@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestFFARangeDeterministicFwdSingleRank(_SingleRankDetTestBase):
-    def _check_empty_and_keyless(
-        self, relations: Relations, pack_gqa: bool, test_case: str
-    ) -> None:
-        seed_test_case(test_case)
-        q, k, v = self._qkv(420, 900, group=2)
-        out, lse = _bitwise_across_margins(
-            lambda m: self._det_fwd(q, k, v, relations, sm_margin=m, pack_gqa=pack_gqa),
-            self._margins(),
-            _assert_out_lse_bitwise,
-            test_case,
-        )
         out_ref, lse_ref = _ref_fwd(q, k, v, relations)
         _assert_fwd_close(out, lse, out_ref, lse_ref, test_case=test_case)
 
     @with_run_in_mp
-    def test_fwd_empty_and_keyless_relations(self):
-        self._check_empty_and_keyless(
-            _EMPTY_KEYLESS_RELATIONS, False, "[fwd_empty_keyless][pack=False]"
+    @parameterize("pack_gqa", [False, True])
+    def test_fwd_empty_and_keyless_relations(self, pack_gqa: bool):
+        test_case = f"[fwd_empty_keyless][pack={pack_gqa}]"
+        seed_test_case(test_case)
+        q, k, v = self._qkv(420, 900, group=2)
+        out, lse = _bitwise_across_margins(
+            lambda m: self._det_fwd(
+                q, k, v, _EMPTY_KEYLESS_RELATIONS, sm_margin=m, pack_gqa=pack_gqa
+            ),
+            self._margins(),
+            _OUT_LSE_NAMES,
+            test_case,
         )
+        out_ref, lse_ref = _ref_fwd(q, k, v, _EMPTY_KEYLESS_RELATIONS)
+        _assert_fwd_close(out, lse, out_ref, lse_ref, test_case=test_case)
 
-    @with_run_in_mp
-    def test_fwd_packed_empty_and_keyless_relations(self):
-        self._check_empty_and_keyless(
-            _PACKED_EMPTY_KEYLESS_RELATIONS, True, "[fwd_empty_keyless][pack=True]"
-        )
 
+@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
+class TestFFARangeDeterministicFwdSingleRank(_SingleRankDetTestBase):
     @with_run_in_mp
     def test_fwd_caller_buffer_accumulation_with_sink(self):
         test_case = "[fwd_caller_buffer_sink]"
@@ -887,7 +647,7 @@ class TestFFARangeDeterministicFwdSingleRank(_SingleRankDetTestBase):
             return out, lse
 
         out, lse = _bitwise_across_margins(
-            run, self._margins(), _assert_out_lse_bitwise, test_case
+            run, self._margins(), _OUT_LSE_NAMES, test_case
         )
         out_ref, lse_ref = _ref_fwd(q, k, v, first_call + second_call, sink)
         _assert_fwd_close(out, lse, out_ref, lse_ref, test_case=test_case)
@@ -896,12 +656,12 @@ class TestFFARangeDeterministicFwdSingleRank(_SingleRankDetTestBase):
     def test_fwd_many_overlapping_ranges_bitwise(self):
         test_case = "[fwd_many_overlapping_ranges]"
         seed_test_case(test_case)
-        relations, total_q, total_k = _many_overlapping_q_relations(_MANY_RANGES)
+        relations, total_q, total_k = _many_overlapping_relations()
         q, k, v = self._qkv(total_q, total_k, group=1, num_head_kv=1)
         out, lse = _bitwise_across_margins(
             lambda m: self._det_fwd(q, k, v, relations, sm_margin=m),
             self._margins(),
-            _assert_out_lse_bitwise,
+            _OUT_LSE_NAMES,
             test_case,
         )
         out_ref, lse_ref = _ref_fwd(q, k, v, relations)
@@ -930,10 +690,12 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
             first = _bitwise_across_margins(
                 lambda m: prob.run(sm_margin=m, **kwargs),
                 self._margins(),
-                _assert_grads_bitwise,
+                _GRAD_NAMES,
                 test_case,
             )
-        _assert_grads_close(first, prob.ref_grads(), test_case)
+        assert_sequence_close(
+            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
+        )
         return first
 
     @with_run_in_mp
@@ -941,7 +703,6 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
         "case",
         [
             _BwdCase(group=1, two_cta=False),
-            _BwdCase(group=2, cat_gqa=True, two_cta=False),
             _BwdCase(group=2, cat_gqa=True, two_cta=True),
         ],
     )
@@ -995,10 +756,12 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
                     cat_gqa=case.cat_gqa,
                 ),
                 self._margins(),
-                _assert_grads_bitwise,
+                _GRAD_NAMES,
                 test_case,
             )
-        _assert_grads_close(first, prob.ref_grads(), test_case)
+        assert_sequence_close(
+            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
+        )
 
     @with_run_in_mp
     @parameterize(
@@ -1027,10 +790,12 @@ class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
                     disable_bwd_dkv_atomic_reduction=True,
                 ),
                 self._margins(),
-                _assert_grads_bitwise,
+                _GRAD_NAMES,
                 test_case,
             )
-        _assert_grads_close(first, prob.ref_grads(), test_case)
+        assert_sequence_close(
+            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
+        )
 
     @with_run_in_mp
     @parameterize(
@@ -1056,14 +821,16 @@ class TestFFARangeDeterministicBwdSingleRank(_SingleRankDetTestBase):
     def test_bwd_empty_and_keyless_relations(self):
         test_case = "[bwd_empty_keyless]"
         seed_test_case(test_case)
-        prob = self._bwd_problem(_BWD_EMPTY_KEYLESS_RELATIONS, 420, 900, group=1)
+        prob = self._bwd_problem(_EMPTY_KEYLESS_RELATIONS, 420, 900, group=1)
         first = _bitwise_across_margins(
             lambda m: prob.run(sm_margin=m),
             self._margins(),
-            _assert_grads_bitwise,
+            _GRAD_NAMES,
             test_case,
         )
-        _assert_grads_close(first, prob.ref_grads(), test_case)
+        assert_sequence_close(
+            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
+        )
 
     @with_run_in_mp
     def test_bwd_disjoint_dq_caller_buffer_accumulation(self):
@@ -1106,36 +873,6 @@ class TestFFARangeDeterministicBwdSingleRank(_SingleRankDetTestBase):
         )
 
     @with_run_in_mp
-    def test_bwd_range_merge_uncovered_k_rows_zeroed(self):
-        test_case = "[bwd_range_merge_uncovered_rows]"
-        seed_test_case(test_case)
-        prob = self._bwd_problem(
-            *_merged_k_relations_heavy_middle(), 2, head_dim=_HEAD_DIM
-        )
-        plan = plan_range_merge_bwd(
-            prob.args["q_ranges"], prob.args["k_ranges"], prob.args["mask_types"]
-        )
-        with _with_2cta(True), _nan_filled_allocations():
-            _, dk, dv = prob.run(
-                sm_margin=0,
-                range_merge=plan,
-                cat_gqa=True,
-                disable_bwd_dkv_atomic_reduction=True,
-            )
-        assert_equal(
-            dk[557:580], torch.zeros_like(dk[557:580]), print_no_mismatch=False
-        )
-        assert_equal(
-            dv[557:580], torch.zeros_like(dv[557:580]), print_no_mismatch=False
-        )
-        assert_equal(
-            dk[1000:1100], torch.zeros_like(dk[1000:1100]), print_no_mismatch=False
-        )
-        assert_equal(
-            dv[1000:1100], torch.zeros_like(dv[1000:1100]), print_no_mismatch=False
-        )
-
-    @with_run_in_mp
     def test_bwd_range_merge_2cta_adjacent_pair_conflicts_bitwise(self):
         test_case = "[bwd_2cta_adjacent_conflicts]"
         seed_test_case(test_case)
@@ -1149,44 +886,33 @@ class TestFFARangeDeterministicBwdSingleRank(_SingleRankDetTestBase):
                     disable_bwd_dkv_atomic_reduction=True,
                 ),
                 self._margins(),
-                _assert_grads_bitwise,
+                _GRAD_NAMES,
                 test_case,
             )
-        _assert_grads_close(first, prob.ref_grads(), test_case)
+        assert_sequence_close(
+            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
+        )
 
     @with_run_in_mp
-    def test_bwd_many_overlapping_q_ranges_bitwise(self):
-        test_case = "[bwd_many_overlapping_q]"
+    def test_bwd_many_overlapping_ranges_bitwise(self):
+        test_case = "[bwd_many_overlapping]"
         seed_test_case(test_case)
         prob = self._bwd_problem(
-            *_many_overlapping_q_relations(_MANY_RANGES), group=1, num_head_kv=1
+            *_many_overlapping_relations(),
+            group=1,
+            num_head_kv=1,
+            disable_fwd_atomic=True,
         )
         with _with_2cta(True):
             first = _bitwise_across_margins(
                 lambda m: prob.run(sm_margin=m, disable_bwd_dkv_atomic_reduction=False),
                 self._margins(),
-                _assert_grads_bitwise,
+                _GRAD_NAMES,
                 test_case,
             )
-        _assert_grads_close(first, prob.ref_grads(), test_case)
-
-    @with_run_in_mp
-    def test_bwd_many_overlapping_k_ranges_bitwise(self):
-        test_case = "[bwd_many_overlapping_k]"
-        seed_test_case(test_case)
-        prob = self._bwd_problem(
-            *_many_overlapping_k_relations(_MANY_RANGES),
-            group=1,
-            num_head_kv=1,
-            disable_fwd_atomic=True,
+        assert_sequence_close(
+            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
         )
-        first = _bitwise_across_margins(
-            lambda m: prob.run(sm_margin=m, disable_bwd_dkv_atomic_reduction=False),
-            self._margins(),
-            _assert_grads_bitwise,
-            test_case,
-        )
-        _assert_grads_close(first, prob.ref_grads(), test_case)
 
     @with_run_in_mp
     def test_bwd_many_merged_k_ranges_bitwise(self):
@@ -1205,10 +931,12 @@ class TestFFARangeDeterministicBwdSingleRank(_SingleRankDetTestBase):
                 disable_bwd_dkv_atomic_reduction=True,
             ),
             self._margins(),
-            _assert_grads_bitwise,
+            _GRAD_NAMES,
             test_case,
         )
-        _assert_grads_close(first, prob.ref_grads(), test_case)
+        assert_sequence_close(
+            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
+        )
 
     @with_run_in_mp
     def test_bwd_empty_ranges_single_cluster(self):
@@ -1227,7 +955,9 @@ class TestFFARangeDeterministicBwdSingleRank(_SingleRankDetTestBase):
                 disable_bwd_dkv_atomic_reduction=False,
                 sm_margin=self.num_sm - 1,
             )
-        _assert_grads_close(grads, prob.ref_grads(), test_case)
+        assert_sequence_close(
+            grads, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
+        )
 
     @with_run_in_mp
     def test_bwd_reads_no_range_back_outside_debug_mode(self):
@@ -1246,10 +976,6 @@ class TestFFARangeDeterministicBwdSingleRank(_SingleRankDetTestBase):
             620,
             group=1,
         )
-        merged = self._bwd_problem(*_merged_k_relations(), group=1)
-        merge_plan = plan_range_merge_bwd(
-            merged.args["q_ranges"], merged.args["k_ranges"], merged.args["mask_types"]
-        )
 
         def run_all() -> None:
             ordered.run(disable_bwd_dkv_atomic_reduction=False)
@@ -1257,12 +983,11 @@ class TestFFARangeDeterministicBwdSingleRank(_SingleRankDetTestBase):
                 disable_bwd_dkv_atomic_reduction=True,
                 disable_fwd_atomic_reduction=True,
             )
-            merged.run(disable_bwd_dkv_atomic_reduction=True, range_merge=merge_plan)
 
         with switch_env("MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE", False):
             run_all()
             torch.cuda.synchronize()
-            with _sync_debug_error():
+            with sync_debug_error():
                 run_all()
 
     @with_run_in_mp
@@ -1298,23 +1023,8 @@ class TestFFARangeDeterministicBwdSingleRank(_SingleRankDetTestBase):
                 sink_in.grad,
             )
 
-        def check(got, want, tc: str) -> None:
-            _assert_out_lse_bitwise(got[:2], want[:2], tc)
-            assert_equal(
-                got[2], want[2], test_case=f"{tc} => dq", print_no_mismatch=False
-            )
-            assert_equal(
-                got[3], want[3], test_case=f"{tc} => dk", print_no_mismatch=False
-            )
-            assert_equal(
-                got[4], want[4], test_case=f"{tc} => dv", print_no_mismatch=False
-            )
-            assert_equal(
-                got[5], want[5], test_case=f"{tc} => dsink", print_no_mismatch=False
-            )
-
         with _with_2cta(True):
-            _bitwise_across_margins(run, self._margins(), check, test_case)
+            _bitwise_across_margins(run, self._margins(), _PUBLIC_API_NAMES, test_case)
 
     @with_run_in_mp
     def test_cuda_graph_replay_packed_fwd_bitwise(self):
@@ -1344,36 +1054,6 @@ class TestFFARangeDeterministicBwdSingleRank(_SingleRankDetTestBase):
             [data1, data0, data1],
             test_case=test_case,
         )
-
-    @with_run_in_mp
-    def test_cuda_graph_replay_bwd_range_merge_bitwise(self):
-        test_case = "[cuda_graph][bwd_range_merge]"
-        seed_test_case(test_case)
-        relations, total_q, total_k = _merged_k_relations()
-        args = self._range_args(relations)
-        plan = plan_range_merge_bwd(
-            args["q_ranges"], args["k_ranges"], args["mask_types"]
-        )
-
-        def fn(*tensors):
-            return _flex_flash_attn_bwd(
-                *tensors,
-                **args,
-                disable_bwd_dkv_atomic_reduction=True,
-                deterministic=True,
-                range_merge=plan,
-                cat_gqa=True,
-            )[:3]
-
-        prob0 = self._bwd_problem(relations, total_q, total_k, group=2)
-        prob1 = self._bwd_problem(relations, total_q, total_k, group=2)
-        with _with_2cta(True):
-            assert_cuda_graph_matches_eager(
-                fn,
-                prob0.tensors(),
-                [prob1.tensors(), prob0.tensors(), prob1.tensors()],
-                test_case=test_case,
-            )
 
     @with_run_in_mp
     def test_cuda_graph_replay_bwd_disjoint_dense_dqacc_bitwise(self):

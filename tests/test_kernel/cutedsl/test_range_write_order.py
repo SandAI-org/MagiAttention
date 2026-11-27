@@ -255,6 +255,17 @@ _BWD_MERGE_FIXTURE = (
     [g + 5 * rep for rep in range(8) for g in (0, 0, 1, 2, 2, 3, 4)],
 )
 
+
+def _cu_batches(group_of: list[int], num_groups: int) -> list[int]:
+    counts = [0] * num_groups
+    for g in group_of:
+        counts[g] += 1
+    cu = [0]
+    for c in counts:
+        cu.append(cu[-1] + c)
+    return cu
+
+
 _TILE_M = 128
 _CLUSTER_TILE_K = 256
 _DQ_STRIDE = 8
@@ -269,20 +280,24 @@ class TestRangeWriteFold(TestCase):
     def setUp(self) -> None:
         self.device = torch.cuda.current_device()
 
-    def _check_plain_fold(
+    def _check_fold(
         self,
+        fixture: tuple[list[list[int]], list[list[int]], list[int], list[int]],
+        *,
         compile_mask: int | None,
         masks: list[int],
         mask_t: torch.Tensor | None,
         mask_fake,
+        cu_batches: torch.Tensor | None,
+        range_merge: bool,
         test_case: str,
     ) -> None:
-        """fold_dq_last/fold_dkv_last of the plain fixture against the oracle.
+        """fold_dq_last/fold_dkv_last of ``fixture`` against the oracle.
 
         ``compile_mask=None`` runs the per-range-mask kernel reading
         ``mMaskTypes``; an ``MT_MAP`` value compiles that mask in statically.
         """
-        q_list, k_list, _, group_of = _BWD_PLAIN_FIXTURE
+        q_list, k_list, _, group_of = fixture
         num_groups = len(k_list)
         q_ranges = to_ranges_tensor(q_list, self.device)
         k_ranges = to_ranges_tensor(k_list, self.device)
@@ -291,13 +306,13 @@ class TestRangeWriteFold(TestCase):
 
         sym = cute.sym_int
         fn = cute.compile(
-            _FoldBwdHarness(_TILE_M, _CLUSTER_TILE_K, compile_mask, False),
+            _FoldBwdHarness(_TILE_M, _CLUSTER_TILE_K, compile_mask, range_merge),
             _fake_i32(sym(), 2),
             _fake_i32(sym(), 2),
             mask_fake,
-            None,
+            _fake_i32(sym()) if range_merge else None,
             _fake_i32(sym(), sym()),
-            _fake_i32(sym(), sym()),
+            None if range_merge else _fake_i32(sym(), sym()),
             Int32(0),
             Int32(0),
             Int32(0),
@@ -306,12 +321,16 @@ class TestRangeWriteFold(TestCase):
             options="--enable-tvm-ffi",
         )
         dq_last = torch.zeros(1, num_q_blocks, dtype=torch.int32, device=self.device)
-        dkv_last = torch.zeros(1, num_k_blocks, dtype=torch.int32, device=self.device)
+        dkv_last = (
+            None
+            if range_merge
+            else torch.zeros(1, num_k_blocks, dtype=torch.int32, device=self.device)
+        )
         fn(
             q_ranges,
             k_ranges,
             mask_t,
-            None,
+            cu_batches,
             dq_last,
             dkv_last,
             0,
@@ -323,7 +342,7 @@ class TestRangeWriteFold(TestCase):
             q_ranges,
             k_ranges,
             mask_t,
-            None,
+            cu_batches,
             dq_last,
             dkv_last,
             _FOLD_SPLIT,
@@ -342,117 +361,73 @@ class TestRangeWriteFold(TestCase):
             _CLUSTER_TILE_K,
             _DQ_STRIDE,
             _DKV_STRIDE,
-            range_merge=False,
+            range_merge=range_merge,
         )
         assert_equal(
             dq_last[0].cpu(), want_dq, test_case=test_case, print_no_mismatch=False
         )
-        assert want_dkv is not None
-        assert_equal(
-            dkv_last[0].cpu(), want_dkv, test_case=test_case, print_no_mismatch=False
-        )
+        if not range_merge:
+            assert want_dkv is not None and dkv_last is not None
+            assert_equal(
+                dkv_last[0].cpu(),
+                want_dkv,
+                test_case=test_case,
+                print_no_mismatch=False,
+            )
 
     def test_bwd_fold_per_range_masks_match_reference(self):
         masks = _BWD_PLAIN_FIXTURE[2]
-        self._check_plain_fold(
-            None,
-            masks,
-            torch.tensor(masks, dtype=torch.int32, device=self.device),
-            _fake_i32(cute.sym_int()),
-            "[fold][per_range]",
+        self._check_fold(
+            _BWD_PLAIN_FIXTURE,
+            compile_mask=None,
+            masks=masks,
+            mask_t=torch.tensor(masks, dtype=torch.int32, device=self.device),
+            mask_fake=_fake_i32(cute.sym_int()),
+            cu_batches=None,
+            range_merge=False,
+            test_case="[fold][per_range]",
         )
 
     def test_bwd_fold_compile_time_full_matches_reference(self):
-        self._check_plain_fold(
-            MT_MAP.full,
-            [MT_MAP.full] * len(_BWD_PLAIN_FIXTURE[2]),
-            None,
-            None,
-            "[fold][full]",
+        self._check_fold(
+            _BWD_PLAIN_FIXTURE,
+            compile_mask=MT_MAP.full,
+            masks=[MT_MAP.full] * len(_BWD_PLAIN_FIXTURE[2]),
+            mask_t=None,
+            mask_fake=None,
+            cu_batches=None,
+            range_merge=False,
+            test_case="[fold][full]",
         )
 
     def test_bwd_fold_compile_time_causal_matches_reference(self):
-        self._check_plain_fold(
-            MT_MAP.causal,
-            [MT_MAP.causal] * len(_BWD_PLAIN_FIXTURE[2]),
-            None,
-            None,
-            "[fold][causal]",
+        self._check_fold(
+            _BWD_PLAIN_FIXTURE,
+            compile_mask=MT_MAP.causal,
+            masks=[MT_MAP.causal] * len(_BWD_PLAIN_FIXTURE[2]),
+            mask_t=None,
+            mask_fake=None,
+            cu_batches=None,
+            range_merge=False,
+            test_case="[fold][causal]",
         )
 
     def test_bwd_dq_fold_range_merge_matches_reference(self):
-        test_case = "[fold][range_merge]"
-        q_list, k_list, masks, group_of = _BWD_MERGE_FIXTURE
-        num_groups = len(k_list)
-        counts = [0] * num_groups
-        for g in group_of:
-            counts[g] += 1
-        cu = [0]
-        for c in counts:
-            cu.append(cu[-1] + c)
-        cu_batches = torch.tensor(cu, dtype=torch.int32, device=self.device)
-        mask_t = torch.tensor(masks, dtype=torch.int32, device=self.device)
-        q_ranges = to_ranges_tensor(q_list, self.device)
-        k_ranges = to_ranges_tensor(k_list, self.device)
-        num_q_blocks = max(e for _, e in q_list) // _TILE_M + 2
-        num_k_blocks = max(e for _, e in k_list) // _CLUSTER_TILE_K + 2
-
-        sym = cute.sym_int
-        fn = cute.compile(
-            _FoldBwdHarness(_TILE_M, _CLUSTER_TILE_K, None, True),
-            _fake_i32(sym(), 2),
-            _fake_i32(sym(), 2),
-            _fake_i32(sym()),
-            _fake_i32(sym()),
-            _fake_i32(sym(), sym()),
-            None,
-            Int32(0),
-            Int32(0),
-            Int32(0),
-            Int32(0),
-            cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True),
-            options="--enable-tvm-ffi",
+        masks = _BWD_MERGE_FIXTURE[2]
+        cu_batches = torch.tensor(
+            _cu_batches(_BWD_MERGE_FIXTURE[3], len(_BWD_MERGE_FIXTURE[1])),
+            dtype=torch.int32,
+            device=self.device,
         )
-        dq_last = torch.zeros(1, num_q_blocks, dtype=torch.int32, device=self.device)
-        fn(
-            q_ranges,
-            k_ranges,
-            mask_t,
-            cu_batches,
-            dq_last,
-            None,
-            0,
-            _FOLD_SPLIT,
-            _DQ_STRIDE,
-            _DKV_STRIDE,
-        )
-        fn(
-            q_ranges,
-            k_ranges,
-            mask_t,
-            cu_batches,
-            dq_last,
-            None,
-            _FOLD_SPLIT,
-            num_groups,
-            _DQ_STRIDE,
-            _DKV_STRIDE,
-        )
-        want_dq, _ = _ref_bwd_last(
-            q_list,
-            k_list,
-            masks,
-            group_of,
-            num_q_blocks,
-            num_k_blocks,
-            _TILE_M,
-            _CLUSTER_TILE_K,
-            _DQ_STRIDE,
-            _DKV_STRIDE,
+        self._check_fold(
+            _BWD_MERGE_FIXTURE,
+            compile_mask=None,
+            masks=masks,
+            mask_t=torch.tensor(masks, dtype=torch.int32, device=self.device),
+            mask_fake=_fake_i32(cute.sym_int()),
+            cu_batches=cu_batches,
             range_merge=True,
-        )
-        assert_equal(
-            dq_last[0].cpu(), want_dq, test_case=test_case, print_no_mismatch=False
+            test_case="[fold][range_merge]",
         )
 
 
