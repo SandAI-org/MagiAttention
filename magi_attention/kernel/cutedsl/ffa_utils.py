@@ -213,6 +213,8 @@ def validate_persistent_grid(*, num_sm: int, sm_margin: int, cluster_size: int) 
 
 def validate_range_deterministic(
     *,
+    major_arch: int,
+    has_block_sparse: bool,
     head_dim: int,
     head_dim_v: int,
     num_sm: int,
@@ -221,6 +223,12 @@ def validate_range_deterministic(
     max_writer: int,
 ) -> None:
     """Tile counter adds one final claim per cluster; caller keeps K range lengths <= max_seqlen_k."""
+    if major_arch not in (10, 11):
+        raise NotImplementedError("deterministic q/k ranges require SM100/SM110")
+    if has_block_sparse:
+        raise NotImplementedError(
+            "deterministic q/k ranges cannot be combined with block sparsity"
+        )
     if head_dim != head_dim_v or head_dim not in (64, 128):
         raise NotImplementedError(
             "deterministic q/k ranges support head_dim == head_dim_v in "
@@ -235,6 +243,23 @@ def validate_range_deterministic(
         raise ValueError(
             f"deterministic q/k ranges: writer number {max_writer} overflows int32"
         )
+
+
+def alloc_write_order_tensors(
+    total_rows: int,
+    tile_rows: int,
+    num_heads: int,
+    max_grid_ctas: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_blocks = (total_rows + tile_rows - 1) // tile_rows + 1
+    write_order = torch.zeros(
+        num_blocks, num_heads, 2, dtype=torch.int32, device=device
+    )
+    write_last = torch.zeros(
+        max_grid_ctas, num_blocks, dtype=torch.int32, device=device
+    )
+    return write_order, write_last
 
 
 # ---------------------------------------------------------------------------

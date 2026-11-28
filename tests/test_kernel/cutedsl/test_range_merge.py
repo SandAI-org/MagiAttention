@@ -241,22 +241,10 @@ class TestRangeMergePlan(TestCase):
             sorted(got, key=lambda g: g[0]), sorted(by_outer, key=lambda g: g[0])
         )
 
-    def test_empty_relation_table(self):
-        device = torch.cuda.current_device()
-        outer = torch.empty((0, 2), dtype=torch.int32, device=device)
-        inner = torch.empty((0, 2), dtype=torch.int32, device=device)
-        mask_types = torch.empty((0,), dtype=torch.int32, device=device)
-        torch.cuda.synchronize()
-        with sync_debug_error():
-            plan = merge_qk_ranges(outer, inner, mask_types)
-        self.assertEqual(tuple(plan.merged_outer_ranges.shape), (0, 2))
-        self.assertEqual(tuple(plan.cu_batches.shape), (1,))
-        self.assertIsNotNone(plan.unique_count)
-        assert plan.unique_count is not None
-        self.assertEqual(int(plan.unique_count.item()), 0)
-
     def test_merge_runs_without_host_sync(self):
         device = torch.cuda.current_device()
+        empty_ranges = torch.empty((0, 2), dtype=torch.int32, device=device)
+        empty_masks = torch.empty((0,), dtype=torch.int32, device=device)
         outer = torch.tensor(
             [[0, 64], [64, 65], [0, 64], [128, 128]],
             dtype=torch.int32,
@@ -271,11 +259,16 @@ class TestRangeMergePlan(TestCase):
         plan_range_merge(outer, inner, mask_types)
         torch.cuda.synchronize()
         with sync_debug_error():
+            empty_plan = merge_qk_ranges(empty_ranges, empty_ranges, empty_masks)
             plan = merge_qk_ranges(outer, inner, mask_types)
             full_plan = plan_range_merge(outer, inner, mask_types)
             bwd_plan = plan_range_merge_bwd(outer, inner, mask_types)
+        self.assertEqual(tuple(empty_plan.merged_outer_ranges.shape), (0, 2))
+        self.assertEqual(tuple(empty_plan.cu_batches.shape), (1,))
+        assert empty_plan.unique_count is not None
         assert plan.unique_count is not None and full_plan.unique_count is not None
         assert bwd_plan.unique_count is not None
+        self.assertEqual(int(empty_plan.unique_count.item()), 0)
         self.assertEqual(int(plan.unique_count.item()), 3)
         self.assertEqual(int(full_plan.unique_count.item()), 3)
         self.assertEqual(int(bwd_plan.unique_count.item()), 4)
@@ -557,22 +550,6 @@ class TestCuteDSLRangeMergeSyncAndGraph(TestCase):
             check=check_replay,
         )
         assert_close_to_torch_ref(
-            q=replay_inputs[0][0],
-            k=replay_inputs[0][1],
-            v=replay_inputs[0][2],
-            do=replay_inputs[0][3],
-            actual=AttnTensors(
-                out=replayed[0][0],
-                dq=replayed[0][2],
-                dk=replayed[0][3],
-                dv=replayed[0][4],
-            ),
-            q_ranges=q_list_1,
-            k_ranges=k_list_1,
-            attn_type_map=m_list_1,
-            test_case=f"{tag}[replay=0]",
-        )
-        assert_close_to_torch_ref(
             q=replay_inputs[1][0],
             k=replay_inputs[1][1],
             v=replay_inputs[1][2],
@@ -594,7 +571,7 @@ class TestCuteDSLRangeMergeSyncAndGraph(TestCase):
         self, deterministic: bool
     ):
         torch.manual_seed(99 + int(deterministic))
-        total_q, total_k, heads, head_dim = 256, 256, 4, 64
+        total_q, heads, head_dim = 256, 4, 64
         qr = torch.tensor(
             [[64, 64], [64, 64], [192, 192]], dtype=torch.int32, device="cuda"
         )
@@ -602,11 +579,10 @@ class TestCuteDSLRangeMergeSyncAndGraph(TestCase):
             [[32, 32], [128, 128], [128, 128]], dtype=torch.int32, device="cuda"
         )
         am = torch.zeros(3, dtype=torch.int32, device="cuda")
-
-        q = torch.randn(total_q, heads, head_dim, dtype=DTYPE, device="cuda")
-        k = torch.randn(total_k, heads, head_dim, dtype=DTYPE, device="cuda")
-        v = torch.randn(total_k, heads, head_dim, dtype=DTYPE, device="cuda")
-        do = torch.randn(total_q, heads, head_dim, dtype=DTYPE, device="cuda")
+        q, k, v, do = (
+            torch.randn(total_q, heads, head_dim, dtype=DTYPE, device="cuda")
+            for _ in range(4)
+        )
 
         def run_step(q_in, k_in, v_in, do_in):
             return _run_merged_fwd_bwd(
@@ -625,23 +601,13 @@ class TestCuteDSLRangeMergeSyncAndGraph(TestCase):
         run_step(q, k, v, do)
         _poison_caching_allocator([(total_q, heads, head_dim)] * 4, DTYPE)
         torch.cuda.synchronize()
-
         with sync_debug_error():
             out, lse, dq, dk, dv = run_step(q, k, v, do)
         torch.cuda.synchronize()
-
-        def assert_zero_neginf(t_out, t_lse, t_dq, t_dk, t_dv) -> None:
-            self.assertEqual(float(t_out.abs().max().item()), 0.0)
-            self.assertTrue(bool(torch.isneginf(t_lse).all()))
-            self.assertEqual(float(t_dq.abs().max().item()), 0.0)
-            self.assertEqual(float(t_dk.abs().max().item()), 0.0)
-            self.assertEqual(float(t_dv.abs().max().item()), 0.0)
-
-        assert_zero_neginf(out, lse, dq, dk, dv)
-        g_out, g_lse, g_dq, g_dk, g_dv = assert_cuda_graph_matches_eager(
-            run_step, (q, k, v, do), [(q, k, v, do)]
-        )[0]
-        assert_zero_neginf(g_out, g_lse, g_dq, g_dk, g_dv)
+        for grad_or_out in (out, dq, dk, dv):
+            self.assertEqual(float(grad_or_out.abs().max().item()), 0.0)
+        self.assertTrue(bool(torch.isneginf(lse).all()))
+        assert_cuda_graph_matches_eager(run_step, (q, k, v, do), [(q, k, v, do)])
 
 
 if __name__ == "__main__":

@@ -407,12 +407,19 @@ def _dq_prev_k_tile(
     n_limit: Int32,
 ) -> Int32:
     """Largest K tile ``< n_limit`` for which a pair writes dQ on physical Q
-    ``block``; -1 if none. ``block`` must overlap the Q range of the pair."""
+    ``block``; -1 if none or if ``block`` does not overlap the Q range."""
     prev_n = Int32(-1)
-    if seqlen_q > 0 and seqlen_k > 0 and n_limit > 0:
-        mt, mt_last = block_tiles(q_start, block, block_info.tile_m)
+    tile_m = block_info.tile_m
+    if (
+        seqlen_q > 0
+        and seqlen_k > 0
+        and n_limit > 0
+        and q_start // tile_m <= block
+        and block <= (q_start + seqlen_q - 1) // tile_m
+    ):
+        mt, mt_last = block_tiles(q_start, block, tile_m)
         while mt <= mt_last:
-            if mt * block_info.tile_m < seqlen_q:
+            if mt * tile_m < seqlen_q:
                 l_m, r_m = block_info.get_n_block_min_max_seqlens(
                     seqlen_q, seqlen_k, mt, attn_type
                 )
@@ -531,18 +538,7 @@ def dq_plan(
     seqlen_k_group: Int32 = Int32(0),
     group_has_block_overlap: cutlass.Boolean = cutlass.Boolean(False),
 ):
-    """Plan the waits and arrivals of one M tile on its left/right physical dQ blocks.
-
-    Returns ``(left, right, wait_pred_left, wait_pred_right, arrive_weight_left,
-    arrive_weight_right)`` for ``wait_blocks`` and ``arrive_blocks``. Only the
-    waiter thread plans; every other thread gets a no-op plan.
-
-    A tile overlaps 1 or 2 physical Q blocks and waits on the immediately
-    preceding active writer: its earlier K tile in the same group, or the last
-    writer of earlier groups folded in ``mLast``. Unaligned monotone ranges
-    arrive once per block on the first/last active M tile; overlapping
-    RangeMerge pairs scan sibling Q intervals within the group.
-    """
+    """Plan the waits and arrivals of one M tile on its left/right physical dQ blocks."""
     left = Int32(0)
     right = Int32(0)
     wait_pred_left = Int32(-1)
@@ -581,14 +577,15 @@ def dq_plan(
             prev_n_right = Int32(-1)
             if not (const_expr(group_pairs is not None) and group_has_block_overlap):
                 if wait_left and (q_start % tile_m) != 0 and m_block > 0:
-                    l_prev, r_prev = block_info.get_n_block_min_max_seqlens(
+                    prev_n_left = _dq_prev_k_tile(
+                        block_info,
                         seqlen_info.seqlen_q,
                         seqlen_info.seqlen_k,
-                        m_block - 1,
+                        q_start,
                         attn_type,
+                        left,
+                        n_block_cta_group,
                     )
-                    if r_prev > l_prev and l_prev < n_block_cta_group:
-                        prev_n_left = cutlass.min(n_block_cta_group, r_prev) - 1
 
         if const_expr(group_pairs is not None):
             if group_has_block_overlap:
@@ -600,63 +597,60 @@ def dq_plan(
                     q_s = mQRanges[row, 0]
                     q_e = mQRanges[row, 1]
                     seqlen_q = q_e - q_s
-                    if seqlen_q > 0:
-                        b0 = q_s // tile_m
-                        b1 = (q_e - 1) // tile_m
-                        if b0 <= right and b1 >= left:
-                            attn_r = Int32(mMaskTypes[row])
-                            if row != pair_cur:
-                                act_s = q_s
-                                act_e = q_e
-                                if attn_r != MT_MAP.full:
-                                    lo_r, hi_r = block_info.get_m_block_min_max_seqlens(
+                    if (
+                        seqlen_q > 0
+                        and q_s // tile_m <= right
+                        and (q_e - 1) // tile_m >= left
+                    ):
+                        attn_r = Int32(mMaskTypes[row])
+                        if row != pair_cur:
+                            act_s = q_s
+                            act_e = q_e
+                            if attn_r != MT_MAP.full:
+                                lo_r, hi_r = block_info.get_m_block_min_max_seqlens(
+                                    seqlen_q, seqlen_k_group, n_block_cta_group, attn_r
+                                )
+                                act_s = q_s + lo_r * tile_m
+                                act_e = cutlass.min(q_s + hi_r * tile_m, q_e)
+                            if act_e > act_s:
+                                ab0 = act_s // tile_m
+                                ab1 = (act_e - 1) // tile_m
+                                if ab0 <= left and left <= ab1:
+                                    if row < pair_cur:
+                                        wait_left = cutlass.Boolean(False)
+                                    else:
+                                        arrive_weight_left = Int32(0)
+                                if right != left and ab0 <= right and right <= ab1:
+                                    if row < pair_cur:
+                                        wait_right = cutlass.Boolean(False)
+                                    else:
+                                        arrive_weight_right = Int32(0)
+                        if need_prev_n:
+                            prev_n_left = cutlass.max(
+                                prev_n_left,
+                                _dq_prev_k_tile(
+                                    block_info,
+                                    seqlen_q,
+                                    seqlen_k_group,
+                                    q_s,
+                                    attn_r,
+                                    left,
+                                    n_block_cta_group,
+                                ),
+                            )
+                            if right != left:
+                                prev_n_right = cutlass.max(
+                                    prev_n_right,
+                                    _dq_prev_k_tile(
+                                        block_info,
                                         seqlen_q,
                                         seqlen_k_group,
-                                        n_block_cta_group,
+                                        q_s,
                                         attn_r,
-                                    )
-                                    act_s = q_s + lo_r * tile_m
-                                    act_e = cutlass.min(q_s + hi_r * tile_m, q_e)
-                                if act_e > act_s:
-                                    ab0 = act_s // tile_m
-                                    ab1 = (act_e - 1) // tile_m
-                                    if ab0 <= left and left <= ab1:
-                                        if row < pair_cur:
-                                            wait_left = cutlass.Boolean(False)
-                                        else:
-                                            arrive_weight_left = Int32(0)
-                                    if right != left and ab0 <= right and right <= ab1:
-                                        if row < pair_cur:
-                                            wait_right = cutlass.Boolean(False)
-                                        else:
-                                            arrive_weight_right = Int32(0)
-                            if need_prev_n:
-                                if b0 <= left and left <= b1:
-                                    prev_n_left = cutlass.max(
-                                        prev_n_left,
-                                        _dq_prev_k_tile(
-                                            block_info,
-                                            seqlen_q,
-                                            seqlen_k_group,
-                                            q_s,
-                                            attn_r,
-                                            left,
-                                            n_block_cta_group,
-                                        ),
-                                    )
-                                if right != left and b0 <= right and right <= b1:
-                                    prev_n_right = cutlass.max(
-                                        prev_n_right,
-                                        _dq_prev_k_tile(
-                                            block_info,
-                                            seqlen_q,
-                                            seqlen_k_group,
-                                            q_s,
-                                            attn_r,
-                                            right,
-                                            n_block_cta_group,
-                                        ),
-                                    )
+                                        right,
+                                        n_block_cta_group,
+                                    ),
+                                )
                     row += 1
 
         slot = cute.arch.block_idx()[0]

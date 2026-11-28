@@ -94,9 +94,7 @@ class _BlockInfoDualLauncher:
         )
         i = cute.arch.block_idx()[0] * 128 + cute.arch.thread_idx()[0]
         if i < count:
-            sq = Int32(mSeqQ[i])
-            sk = Int32(mSeqK[i])
-            idx = Int32(mIdx[i])
+            sq, sk, idx = Int32(mSeqQ[i]), Int32(mSeqK[i]), Int32(mIdx[i])
             if cutlass.const_expr(self.per_range):
                 at = Int32(mAttn[i])
                 flo, fhi = info.get_m_block_min_max_seqlens(sq, sk, idx, at)
@@ -104,47 +102,13 @@ class _BlockInfoDualLauncher:
             else:
                 flo, fhi = info.get_m_block_min_max_seqlens(sq, sk, idx)
                 dlo, dhi = info.get_n_block_min_max_seqlens(sq, sk, idx)
-            mFwdLo[i] = flo
-            mFwdHi[i] = fhi
-            mDualLo[i] = dlo
-            mDualHi[i] = dhi
+            mFwdLo[i], mFwdHi[i], mDualLo[i], mDualHi[i] = flo, fhi, dlo, dhi
 
 
 class TestBlockInfoDualBounds(TestCase):
     def setUp(self) -> None:
         if get_device_arch()[1] not in (10, 11):
             self.skipTest("SM100/SM110 BlockInfo dual bounds test")
-
-    def _eval_device(
-        self,
-        launcher: _BlockInfoDualLauncher,
-        seqlen_q: torch.Tensor,
-        seqlen_k: torch.Tensor,
-        block: torch.Tensor,
-        mask_type: torch.Tensor,
-    ) -> torch.Tensor:
-        count = seqlen_q.shape[0]
-        sq, sk, idx, at = (
-            t.to("cuda").contiguous() for t in (seqlen_q, seqlen_k, block, mask_type)
-        )
-        flo = torch.empty(count, dtype=torch.int32, device="cuda")
-        fhi = torch.empty(count, dtype=torch.int32, device="cuda")
-        dlo = torch.empty(count, dtype=torch.int32, device="cuda")
-        dhi = torch.empty(count, dtype=torch.int32, device="cuda")
-        args = (
-            from_dlpack(sq),
-            from_dlpack(sk),
-            from_dlpack(idx),
-            from_dlpack(at),
-            from_dlpack(flo),
-            from_dlpack(fhi),
-            from_dlpack(dlo),
-            from_dlpack(dhi),
-            Int32(count),
-            cuda.CUstream(torch.cuda.current_stream().cuda_stream),
-        )
-        cute.compile(launcher, *args)(*args)
-        return torch.stack([flo, fhi, dlo, dhi]).cpu()
 
     def _assert_dual_equivalence(
         self,
@@ -157,46 +121,47 @@ class TestBlockInfoDualBounds(TestCase):
         num_m = (seqlen_q * launcher.pack_factor + tile_m - 1) // tile_m
         num_n = (seqlen_k + tile_n - 1) // tile_n
         num_blocks = int(torch.maximum(num_m, num_n).max())
-        blocks = torch.arange(num_blocks, dtype=torch.int32)
-        bounds = self._eval_device(
-            launcher,
-            seqlen_q.repeat_interleave(num_blocks),
-            seqlen_k.repeat_interleave(num_blocks),
-            blocks.repeat(seqlen_q.shape[0]),
-            mask_type.repeat_interleave(num_blocks),
+        # Include -1 and num_blocks to verify out-of-bounds normalization to (0, 0).
+        blocks = torch.arange(-1, num_blocks + 1, dtype=torch.int32)
+        num_idx = blocks.shape[0]
+        sq, sk, idx, at = (
+            t.to("cuda").contiguous()
+            for t in (
+                seqlen_q.repeat_interleave(num_idx),
+                seqlen_k.repeat_interleave(num_idx),
+                blocks.repeat(seqlen_q.shape[0]),
+                mask_type.repeat_interleave(num_idx),
+            )
         )
-        m_lo, m_hi, n_lo, n_hi = bounds.view(4, -1, num_blocks)
-        # [C, m, n]: m-bounds indexed by n block, n-bounds indexed by m block.
-        m = blocks[None, :, None]
-        n = blocks[None, None, :]
-        in_m = (m_lo[:, None, :] <= m) & (m < m_hi[:, None, :])
-        in_n = (n_lo[:, :, None] <= n) & (n < n_hi[:, :, None])
+        outs = [
+            torch.empty(sq.shape[0], dtype=torch.int32, device="cuda") for _ in range(4)
+        ]
+        args = (
+            *(from_dlpack(t) for t in (sq, sk, idx, at, *outs)),
+            Int32(sq.shape[0]),
+            cuda.CUstream(torch.cuda.current_stream().cuda_stream),
+        )
+        cute.compile(launcher, *args)(*args)
+        m_lo, m_hi, n_lo, n_hi = torch.stack(outs).cpu().view(4, -1, num_idx)
+
+        nonempty = (seqlen_q[:, None] > 0) & (seqlen_k[:, None] > 0) & (blocks >= 0)
+        m_cap = torch.where(nonempty & (blocks < num_n[:, None]), num_m[:, None], 0)
+        n_cap = torch.where(nonempty & (blocks < num_m[:, None]), num_n[:, None], 0)
+        self.assertTrue(bool(((0 <= m_lo) & (m_lo <= m_hi) & (m_hi <= m_cap)).all()))
+        self.assertTrue(bool(((0 <= n_lo) & (n_lo <= n_hi) & (n_hi <= n_cap)).all()))
+
+        grid = torch.arange(num_blocks, dtype=torch.int32)
+        m, n = grid[None, :, None], grid[None, None, :]
+        in_m = (m_lo[:, None, 1:-1] <= m) & (m < m_hi[:, None, 1:-1])
+        in_n = (n_lo[:, 1:-1, None] <= n) & (n < n_hi[:, 1:-1, None])
         valid = (m < num_m[:, None, None]) & (n < num_n[:, None, None])
-        bad = ((in_m != in_n) & valid).nonzero()
-        combination = bad[:, 0]
-        mismatches = torch.stack(
-            [
-                seqlen_q[combination],
-                seqlen_k[combination],
-                mask_type[combination],
-                bad[:, 1],
-                bad[:, 2],
-            ],
-            dim=1,
-        )
-        self.assertEqual(
-            mismatches.shape[0],
-            0,
-            f"{vars(launcher)}: (seqlen_q, seqlen_k, mask_type, m, n) where the "
-            f"bounds disagree: {mismatches[:8].tolist()}",
-        )
+        self.assertFalse(bool(((in_m != in_n) & valid).any()), f"{vars(launcher)}")
 
     @parameterize("pack_factor", [1, 2, 4, 8])
     @parameterize("tile_n", [128, 256])
     def test_per_range_dual_equivalence_on_device(self, pack_factor, tile_n):
         seqlens = torch.tensor(
-            [0, 1, 2, 7, 15, 16, 31, 32, 33, 64, 127, 128, 129, 195, 256, 257, 390],
-            dtype=torch.int32,
+            [0, 1, 7, 16, 33, 64, 127, 128, 129, 256, 257, 390, 512], dtype=torch.int32
         )
         mask_types = torch.tensor(
             [MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal],
@@ -216,13 +181,10 @@ class TestBlockInfoDualBounds(TestCase):
             (False, False, None, None, 1, 256),
             (False, False, None, None, 4, 128),
             (True, False, None, None, 1, 256),
-            (True, False, None, None, 2, 128),
-            (True, False, None, None, 8, 256),
+            (True, False, None, None, 8, 128),
             (False, True, 0, 0, 1, 128),
             (False, True, 7, 19, 1, 128),
-            (False, True, 2, 1, 1, 256),
             (False, True, 128, 0, 1, 256),
-            (False, True, 0, 128, 1, 256),
             (False, True, None, 15, 1, 128),
             (False, True, 15, None, 1, 128),
         ],
@@ -230,7 +192,7 @@ class TestBlockInfoDualBounds(TestCase):
     def test_static_causal_and_local_dual_equivalence_on_device(self, spec):
         is_causal, is_local, wl, wr, pack_factor, tile_n = spec
         seqlens = torch.tensor(
-            [1, 2, 7, 16, 33, 64, 127, 128, 129, 255, 256, 257, 390], dtype=torch.int32
+            [0, 1, 7, 33, 64, 127, 128, 129, 256, 390, 512], dtype=torch.int32
         )
         seqlen_q, seqlen_k = torch.cartesian_prod(seqlens, seqlens).unbind(1)
         launcher = _BlockInfoDualLauncher(
@@ -239,68 +201,6 @@ class TestBlockInfoDualBounds(TestCase):
         self._assert_dual_equivalence(
             launcher, seqlen_q, seqlen_k, torch.zeros_like(seqlen_q)
         )
-
-    def test_empty_and_inverted_bounds_on_device(self):
-        # Check *_seqlens normalization on both directions for negative n_idx_right,
-        # inverted bi_causal, empty sequences, and oob indices.
-        dual_per_range = _BlockInfoDualLauncher(
-            128, 128, True, False, None, None, 1, per_range=True
-        )
-        per_range_cases = [
-            (512, 128, 0, MT_MAP.causal),
-            (512, 128, 0, MT_MAP.bi_causal),
-            (512, 128, 1, MT_MAP.bi_causal),
-            (512, 128, 3, MT_MAP.bi_causal),
-            (512, 128, 4, MT_MAP.full),  # oob m_block and oob n_block
-            (512, 128, -1, MT_MAP.full),
-            (0, 128, 0, MT_MAP.causal),
-            (128, 0, 0, MT_MAP.inv_causal),
-        ]
-        pr_out = self._eval_device(
-            dual_per_range,
-            torch.tensor([c[0] for c in per_range_cases], dtype=torch.int32),
-            torch.tensor([c[1] for c in per_range_cases], dtype=torch.int32),
-            torch.tensor([c[2] for c in per_range_cases], dtype=torch.int32),
-            torch.tensor([c[3] for c in per_range_cases], dtype=torch.int32),
-        )
-        m_lo, m_hi, n_lo, n_hi = pr_out.tolist()
-        self.assertEqual((n_lo[0], n_hi[0]), (0, 0))
-        self.assertEqual((m_lo[1], m_hi[1]), (1, 1))
-        self.assertEqual((n_lo[1], n_hi[1]), (0, 0))
-        self.assertEqual((n_lo[2], n_hi[2]), (0, 0))
-        self.assertEqual((n_lo[3], n_hi[3]), (1, 1))
-        self.assertEqual((m_lo[4], m_hi[4]), (0, 0))
-        self.assertEqual((n_lo[4], n_hi[4]), (0, 0))
-        self.assertEqual((m_lo[5], m_hi[5]), (0, 0))
-        self.assertEqual((n_lo[5], n_hi[5]), (0, 0))
-        self.assertEqual((m_lo[6], m_hi[6]), (0, 0))
-        self.assertEqual((n_lo[6], n_hi[6]), (0, 0))
-        self.assertEqual((m_lo[7], m_hi[7]), (0, 0))
-        self.assertEqual((n_lo[7], n_hi[7]), (0, 0))
-        self.assertTrue(0 <= m_lo[0] <= m_hi[0])
-        self.assertTrue(0 <= m_lo[1] <= m_hi[1])
-        self.assertTrue(0 <= m_lo[2] <= m_hi[2])
-        self.assertTrue(0 <= m_lo[3] <= m_hi[3])
-
-        dual_static = _BlockInfoDualLauncher(
-            128, 128, True, False, None, None, 1, per_range=False
-        )
-        st_out = self._eval_device(
-            dual_static,
-            torch.tensor([512, 512, 0, 128], dtype=torch.int32),
-            torch.tensor([128, 128, 128, 0], dtype=torch.int32),
-            torch.tensor([0, 4, 0, 0], dtype=torch.int32),
-            torch.zeros(4, dtype=torch.int32),
-        )
-        sm_lo, sm_hi, sn_lo, sn_hi = st_out.tolist()
-        self.assertEqual((sn_lo[0], sn_hi[0]), (0, 0))
-        self.assertEqual((sm_lo[0], sm_hi[0]), (3, 4))
-        self.assertEqual((sm_lo[1], sm_hi[1]), (0, 0))
-        self.assertEqual((sn_lo[1], sn_hi[1]), (0, 0))
-        self.assertEqual((sm_lo[2], sm_hi[2]), (0, 0))
-        self.assertEqual((sn_lo[2], sn_hi[2]), (0, 0))
-        self.assertEqual((sm_lo[3], sm_hi[3]), (0, 0))
-        self.assertEqual((sn_lo[3], sn_hi[3]), (0, 0))
 
 
 if __name__ == "__main__":

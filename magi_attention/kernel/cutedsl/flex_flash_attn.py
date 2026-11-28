@@ -53,6 +53,7 @@ from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
     TorchFlexAttnArgs,
+    alloc_write_order_tensors,
     convert_from_dlpack_leading_static,
     get_device_arch,
     hash_callable,
@@ -337,6 +338,8 @@ def _flex_flash_attn_fwd(
         softmax_scale = 1.0 / math.sqrt(head_dim)
     qhead_per_kvhead = num_head // num_head_kv
 
+    # The atomic merge is a ranges-overlap path; a no-op for dense, and
+    # unsupported outside SM100/SM110 — fall back to the direct store there.
     if (
         deterministic
         and has_ranges
@@ -344,16 +347,9 @@ def _flex_flash_attn_fwd(
         and major_arch not in (10, 11)
     ):
         raise NotImplementedError("deterministic q/k ranges require SM100/SM110")
-    # The atomic merge is a ranges-overlap path; a no-op for dense, and
-    # unsupported outside SM100/SM110 — fall back to the direct store there.
     if not has_ranges or major_arch not in (10, 11):
         disable_fwd_atomic_reduction = True
     fwd_deterministic = deterministic and not disable_fwd_atomic_reduction
-    if fwd_deterministic:
-        if block_sparse_tensors is not None:
-            raise NotImplementedError(
-                "deterministic q/k ranges cannot be combined with block sparsity"
-            )
 
     # The SM80 fwd kernel indexes mQ by query head directly; the packed-GQA
     # epilogue path is unsupported, so force unpacked store.
@@ -518,6 +514,8 @@ def _flex_flash_attn_fwd(
         tile_heads = num_head_kv if pack_gqa else num_head
         tile_rows = max_seqlen_q * (qhead_per_kvhead if pack_gqa else 1)
         validate_range_deterministic(
+            major_arch=major_arch,
+            has_block_sparse=use_block_sparsity,
             head_dim=head_dim,
             head_dim_v=head_dim_v,
             num_sm=num_sm,
@@ -647,25 +645,17 @@ def _flex_flash_attn_fwd(
     else:
         aux_tensor_metadata = None
 
-    range_locks = None
-    write_order = None
-    write_last = None
+    range_locks = write_order = write_last = None
     if not disable_fwd_atomic_reduction:
-        # One int32 lock, or one [published, count] write order, per
-        # (tile_m rows, head) of the layout the kernel tiles (packed rows and
-        # kv heads under pack_gqa); +1 guard tile.
         lock_rows = total_q * (qhead_per_kvhead if pack_gqa else 1)
-        num_lock_blocks = (lock_rows + tile_m - 1) // tile_m + 1
         lock_heads = num_head_kv if pack_gqa else num_head
         if fwd_deterministic:
             assert q_ranges is not None and max_grid_ctas is not None
-            write_order = torch.zeros(
-                num_lock_blocks, lock_heads, 2, dtype=torch.int32, device=device
-            )
-            write_last = torch.zeros(
-                max_grid_ctas, num_lock_blocks, dtype=torch.int32, device=device
+            write_order, write_last = alloc_write_order_tensors(
+                lock_rows, tile_m, lock_heads, max_grid_ctas, device
             )
         else:
+            num_lock_blocks = (lock_rows + tile_m - 1) // tile_m + 1
             range_locks = torch.zeros(
                 num_lock_blocks, lock_heads, dtype=torch.int32, device=device
             )
@@ -1363,12 +1353,6 @@ def _flex_flash_attn_bwd(
     num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
     dq_writer_stride: int | None = None
     if range_deterministic:
-        if major_arch not in (10, 11):
-            raise NotImplementedError("deterministic q/k ranges require SM100/SM110")
-        if block_sparse_tensors is not None:
-            raise NotImplementedError(
-                "deterministic q/k ranges cannot be combined with block sparsity"
-            )
         dkv_writer_stride = gqa_fold.dkv_writer_stride
         cluster_tile_k = n_block_size * cluster_size
         max_k_tiles = (seqlen_k + cluster_tile_k - 1) // cluster_tile_k
@@ -1377,6 +1361,8 @@ def _flex_flash_attn_bwd(
         dq_max_writer = 0 if use_dense_dqacc_for_ranges else batch_size * max_k_tiles
         dkv_max_writer = 0 if direct_dkv else batch_size * dkv_writer_stride
         validate_range_deterministic(
+            major_arch=major_arch,
+            has_block_sparse=block_sparse_tensors is not None,
             head_dim=head_dim,
             head_dim_v=head_dim_v,
             num_sm=num_sm,
@@ -1651,23 +1637,16 @@ def _flex_flash_attn_bwd(
             and dq_writer_stride is not None
             and max_grid_ctas is not None
         )
-        num_q_blocks = (total_q + m_block_size - 1) // m_block_size + 1
-        dq_write_order = torch.zeros(
-            num_q_blocks, num_head, 2, dtype=torch.int32, device=device
-        )
-        dq_last = torch.zeros(
-            max_grid_ctas, num_q_blocks, dtype=torch.int32, device=device
+        dq_write_order, dq_last = alloc_write_order_tensors(
+            total_q, m_block_size, num_head, max_grid_ctas, device
         )
     dkv_write_order = dkv_last = None
     if range_deterministic and not direct_dkv:
-        assert q_ranges is not None and k_ranges is not None
-        assert max_grid_ctas is not None
-        num_k_blocks = (total_k + cluster_tile_k - 1) // cluster_tile_k + 1
-        dkv_write_order = torch.zeros(
-            num_k_blocks, num_head_kv, 2, dtype=torch.int32, device=device
+        assert (
+            q_ranges is not None and k_ranges is not None and max_grid_ctas is not None
         )
-        dkv_last = torch.zeros(
-            max_grid_ctas, num_k_blocks, dtype=torch.int32, device=device
+        dkv_write_order, dkv_last = alloc_write_order_tensors(
+            total_k, cluster_tile_k, num_head_kv, max_grid_ctas, device
         )
 
     # The DYNAMIC schedule's tile counter.

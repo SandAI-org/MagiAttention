@@ -27,7 +27,10 @@ from magi_attention.kernel.cutedsl.flex_flash_attn import (
     _flex_flash_attn_bwd,
     _flex_flash_attn_fwd,
 )
-from magi_attention.kernel.cutedsl.range_merge import plan_range_merge_bwd
+from magi_attention.kernel.cutedsl.range_merge import (
+    RangeMergePlan,
+    plan_range_merge_bwd,
+)
 from magi_attention.testing import parameterize, ref_attn_func
 from magi_attention.testing.cutedsl_utils import (
     SM100_FAMILY_REQUIRED,
@@ -58,77 +61,13 @@ _TOL = 1e-2
 _LSE_TOL = 1e-3
 _GRAD_TOL = 3e-2
 _ALL_MASKS = (MT_MAP.full, MT_MAP.causal, MT_MAP.inv_causal, MT_MAP.bi_causal)
-_MANY_RANGES = 212
 _OUT_LSE_NAMES = ("out", "lse")
 _GRAD_NAMES = ("dq", "dk", "dv")
 _PUBLIC_API_NAMES = ("out", "lse", "dq", "dk", "dv", "dsink")
 
 
-@dataclass(frozen=True)
-class _FwdCase:
-    group: int = 2
-    out_dtype: torch.dtype = torch.float32
-    pack_gqa: bool = False
-
-
-@dataclass(frozen=True)
-class _BwdCase:
-    group: int = 1
-    cat_gqa: bool = False
-    two_cta: bool = False
-    head_dim: int = _HEAD_DIM
-    direct_dkv: bool = True
-    range_merge: bool = False
-
-
-@dataclass(frozen=True)
-class _BwdProblem:
-    q: torch.Tensor
-    k: torch.Tensor
-    v: torch.Tensor
-    out: torch.Tensor
-    lse: torch.Tensor
-    do: torch.Tensor
-    relations: Relations
-    args: dict
-
-    def tensors(
-        self,
-    ) -> tuple[
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-    ]:
-        return (self.q, self.k, self.v, self.out, self.lse, self.do)
-
-    def run(self, **kwargs) -> tuple[torch.Tensor, ...]:
-        return _flex_flash_attn_bwd(
-            self.q,
-            self.k,
-            self.v,
-            self.out,
-            self.lse,
-            self.do,
-            **self.args,
-            deterministic=True,
-            **kwargs,
-        )[:3]
-
-    def ref_grads(self) -> tuple[torch.Tensor, ...]:
-        return _ref_grads(self.q, self.k, self.v, self.do, self.relations)
-
-
 def _with_2cta(enabled: bool) -> switch_env:
     return switch_env("MAGI_ATTENTION_FFA_CUTEDSL_DISABLE_2CTA", not enabled)
-
-
-# ---------------------------------------------------------------------------
-# Bitwise / closeness assertions, unrolled per tensor: no loops over test
-# dimensions anywhere in this file.
-# ---------------------------------------------------------------------------
 
 
 def _assert_fwd_close(
@@ -136,8 +75,7 @@ def _assert_fwd_close(
     lse: torch.Tensor,
     out_ref: torch.Tensor,
     lse_ref: torch.Tensor,
-    *,
-    test_case: str = "",
+    test_case: str,
 ) -> None:
     assert_close(
         out.float(),
@@ -148,9 +86,6 @@ def _assert_fwd_close(
         print_rank=-1,
         print_no_mismatch=False,
     )
-    # Rows attending nothing (or covered by no relation) carry lse -inf on
-    # both sides; compare the finite pattern and the finite values instead of
-    # the raw tensors, where -inf - -inf is nan.
     finite = torch.isfinite(lse_ref)
     assert_equal(
         torch.isfinite(lse),
@@ -176,16 +111,10 @@ def _bitwise_across_margins(
     names: Sequence[str],
     test_case: str,
 ) -> Sequence[torch.Tensor]:
-    """One kernel invocation per margin, straight-line: rerun at the base
-    margin, plus the two other scheduler budgets, all bitwise identical."""
     base = run(margins[0])
     assert_sequence_equal(run(margins[0]), base, names, f"{test_case}[rerun]")
-    assert_sequence_equal(
-        run(margins[1]), base, names, f"{test_case}[margin={margins[1]}]"
-    )
-    assert_sequence_equal(
-        run(margins[2]), base, names, f"{test_case}[margin={margins[2]}]"
-    )
+    for m in margins[1:]:
+        assert_sequence_equal(run(m), base, names, f"{test_case}[margin={m}]")
     return base
 
 
@@ -252,8 +181,20 @@ def _ref_grads(
 
 
 # ---------------------------------------------------------------------------
-# Relation fixtures (input data construction)
+# Relation fixtures
 # ---------------------------------------------------------------------------
+
+
+def _overlapping_cov4() -> tuple[Relations, int, int]:
+    return overlapping_relations(
+        [129, 300, 1000, 77], coverage=4, mask_types=[MT_MAP.full, MT_MAP.causal]
+    )
+
+
+def _overlapping_cov3() -> tuple[Relations, int, int]:
+    return overlapping_relations(
+        [129, 300, 1000, 77], coverage=3, mask_types=[MT_MAP.full, MT_MAP.causal]
+    )
 
 
 def _shared_k_relations() -> tuple[Relations, int, int]:
@@ -294,9 +235,7 @@ def _merged_k_relations() -> tuple[Relations, int, int]:
 
 
 def _merged_k_relations_2cta_adjacent() -> tuple[Relations, int, int]:
-    """Eight K groups of 160 rows after a full [0, 256) relation. Each group
-    holds four 128-row pairs whose starts are 64 apart, so adjacent pairs of a
-    group share a Q block; masks are inv_causal, bi_causal, bi_causal, causal."""
+    """Eight K groups whose four 128-row Q pairs shift by 64 rows per pair."""
     masks = (MT_MAP.inv_causal, MT_MAP.bi_causal, MT_MAP.bi_causal, MT_MAP.causal)
     relations: Relations = [([0, 3072], [0, 256], MT_MAP.full)]
     for g in range(8):
@@ -307,25 +246,21 @@ def _merged_k_relations_2cta_adjacent() -> tuple[Relations, int, int]:
 
 
 def _many_overlapping_relations() -> tuple[Relations, int, int]:
-    """256 disjoint (qb, kb) rectangles across 16x16 unaligned bands so every
-    physical Q and K block collects more than 32 writers."""
+    """256 disjoint (qb, kb) rectangles so every Q/K block gets >32 writers."""
     bands = 16
-    relations: Relations = []
-    for g in range(bands * bands):
-        qb = g % bands
-        kb = (g // bands + qb) % bands
-        relations.append(
-            (
-                [qb * 48 + 3, qb * 48 + 47],
-                [kb * 48 + 5, kb * 48 + 49],
-                _ALL_MASKS[g % len(_ALL_MASKS)],
-            )
+    relations: Relations = [
+        (
+            [(g % bands) * 48 + 3, (g % bands) * 48 + 47],
+            [((g // bands + g) % bands) * 48 + 5, ((g // bands + g) % bands) * 48 + 49],
+            _ALL_MASKS[g % len(_ALL_MASKS)],
         )
+        for g in range(bands * bands)
+    ]
     return relations, bands * 48 + 16, bands * 48 + 16
 
 
-def _many_merged_k_relations(num_groups: int) -> tuple[Relations, int, int]:
-    k_step, total_q = 32, 256
+def _many_merged_k_relations() -> tuple[Relations, int, int]:
+    num_groups, k_step, total_q = 212, 32, 256
     relations: Relations = []
     for g in range(num_groups):
         k_range = [g * k_step, (g + 1) * k_step]
@@ -335,44 +270,89 @@ def _many_merged_k_relations(num_groups: int) -> tuple[Relations, int, int]:
     return relations, total_q, num_groups * k_step + 32
 
 
-_DISJOINT_Q_RELATIONS: Relations = [
-    ([3, 132], [0, 290], MT_MAP.full),
-    ([140, 410], [290, 560], MT_MAP.causal),
-    ([420, 420], [560, 620], MT_MAP.full),
-    ([430, 690], [620, 620], MT_MAP.full),
-    ([700, 965], [620, 900], MT_MAP.inv_causal),
-    ([970, 1240], [900, 1170], MT_MAP.bi_causal),
-]
+def _disjoint_q_relations() -> tuple[Relations, int, int]:
+    return (
+        [
+            ([3, 132], [0, 290], MT_MAP.full),
+            ([140, 410], [290, 560], MT_MAP.causal),
+            ([420, 420], [560, 620], MT_MAP.full),
+            ([430, 690], [620, 620], MT_MAP.full),
+            ([700, 965], [620, 900], MT_MAP.inv_causal),
+            ([970, 1240], [900, 1170], MT_MAP.bi_causal),
+        ],
+        1260,
+        1180,
+    )
 
-_EMPTY_KEYLESS_RELATIONS: Relations = [
-    ([1, 130], [0, 200], MT_MAP.full),
-    ([50, 50], [200, 260], MT_MAP.full),
-    ([100, 300], [260, 260], MT_MAP.full),
-    ([127, 400], [260, 500], MT_MAP.causal),
-    ([129, 130], [500, 520], MT_MAP.full),
-    ([0, 257], [520, 900], MT_MAP.full),
-]
 
-_STRADDLING_RELATIONS: Relations = [
-    ([0, 390], [10, 270], MT_MAP.bi_causal),
-    ([0, 390], [270, 530], MT_MAP.bi_causal),
-    ([400, 790], [270, 530], MT_MAP.bi_causal),
-    ([400, 520], [530, 600], MT_MAP.bi_causal),
-    ([7, 267], [600, 860], MT_MAP.causal),
-    ([6, 266], [600, 860], MT_MAP.inv_causal),
-    ([19, 535], [860, 1140], MT_MAP.full),
-]
+def _empty_keyless_relations() -> tuple[Relations, int, int]:
+    return (
+        [
+            ([1, 130], [0, 200], MT_MAP.full),
+            ([50, 50], [200, 260], MT_MAP.full),
+            ([100, 300], [260, 260], MT_MAP.full),
+            ([127, 400], [260, 500], MT_MAP.causal),
+            ([129, 130], [500, 520], MT_MAP.full),
+            ([0, 257], [520, 900], MT_MAP.full),
+        ],
+        420,
+        900,
+    )
 
-_GRAPH_DISJOINT_RELATIONS: Relations = [
-    ([5, 270], [0, 310], MT_MAP.causal),
-    ([280, 550], [120, 420], MT_MAP.inv_causal),
-    ([560, 830], [200, 510], MT_MAP.full),
+
+def _straddling_relations() -> tuple[Relations, int, int]:
+    return (
+        [
+            ([0, 390], [10, 270], MT_MAP.bi_causal),
+            ([0, 390], [270, 530], MT_MAP.bi_causal),
+            ([400, 790], [270, 530], MT_MAP.bi_causal),
+            ([400, 520], [530, 600], MT_MAP.bi_causal),
+            ([7, 267], [600, 860], MT_MAP.causal),
+            ([6, 266], [600, 860], MT_MAP.inv_causal),
+            ([19, 535], [860, 1140], MT_MAP.full),
+        ],
+        800,
+        1150,
+    )
+
+
+@dataclass(frozen=True)
+class _FwdCase:
+    name: str
+    fixture: Callable[[], tuple[Relations, int, int]]
+    group: int = 2
+    num_head_kv: int = _NUM_HEAD_KV
+    out_dtype: torch.dtype = torch.float32
+    pack_gqa: bool = False
+
+
+@dataclass(frozen=True)
+class _BwdCase:
+    name: str
+    fixture: Callable[[], tuple[Relations, int, int]]
+    group: int = 1
+    num_head_kv: int = _NUM_HEAD_KV
+    cat_gqa: bool = False
+    two_cta: bool = False
+    head_dim: int = _HEAD_DIM
+    direct_dkv: bool = True
+    disable_fwd_atomic: bool = False
+    range_merge: str = "off"  # "off", "auto", or "plan"
+
+
+_BwdTensors = tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]
 
 
 class _RangeDetHelpers:
     if TYPE_CHECKING:
-        # A runtime definition would shadow the host class's `device` in the MRO.
+
         @property
         def device(self) -> int:
             ...
@@ -382,9 +362,6 @@ class _RangeDetHelpers:
         return torch.cuda.get_device_properties(self.device).multi_processor_count
 
     def _margins(self) -> tuple[int, int, int]:
-        """The full grid, 8 CTAs and 2 CTAs. Every fixture's grid bound exceeds
-        8, so the three margins launch three grid sizes, and 2 CTAs hold one
-        cluster for the 1-CTA and the 2-CTA kernels alike."""
         return (0, self.num_sm - 8, self.num_sm - 2)
 
     def _qkv(
@@ -424,7 +401,10 @@ class _RangeDetHelpers:
             **kwargs,
         )
 
-    def _bwd_problem(
+    def _det_bwd(self, tensors, args, **kwargs):
+        return _flex_flash_attn_bwd(*tensors, **args, deterministic=True, **kwargs)[:3]
+
+    def _bwd_inputs(
         self,
         relations: Relations,
         total_q: int,
@@ -434,7 +414,7 @@ class _RangeDetHelpers:
         head_dim: int = _HEAD_DIM,
         num_head_kv: int = _NUM_HEAD_KV,
         disable_fwd_atomic: bool = False,
-    ) -> _BwdProblem:
+    ) -> tuple[_BwdTensors, dict]:
         q, k, v = self._qkv(
             total_q, total_k, group, head_dim=head_dim, num_head_kv=num_head_kv
         )
@@ -447,40 +427,26 @@ class _RangeDetHelpers:
             disable_fwd_atomic_reduction=disable_fwd_atomic,
             deterministic=True,
         )
-        return _BwdProblem(
-            q, k, v, out.to(q.dtype), lse, torch.randn_like(q), relations, args
-        )
+        return (q, k, v, out.to(q.dtype), lse, torch.randn_like(q)), args
 
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class _SingleGpuDetTestBase(_RangeDetHelpers, TestCase):
+class TestFFARangeDeterministicHost(_RangeDetHelpers, TestCase):
     @property
     def device(self) -> int:
         return torch.cuda.current_device()
 
-
-class _SingleRankDetTestBase(_RangeDetHelpers, CuteDSLDistTestBase):
-    """One rank: a test without parameter cases has nothing to spread over the
-    GPUs, and its subprocess keeps the dist base's hang timeout."""
-
-    @property
-    def world_size(self) -> int:
-        return 1
-
-
-@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestFFARangeDeterministicHost(_SingleGpuDetTestBase):
-    def test_tile_counter_bound_counts_overlapping_ranges(self):
-        seed_test_case("test_tile_counter_bound_counts_overlapping_ranges")
-        # 2**24 ranges give 2**33 fwd and bwd tiles, four times the int32 tile
-        # counter, so a tile twice as large still overflows it.
+    def test_host_bounds_and_debug_validation(self):
+        seed_test_case("test_host_bounds_and_debug_validation")
         num_ranges, rows = 2**24, 4096
-        ranges = torch.tensor([0, rows], dtype=torch.int32, device=self.device).expand(
-            num_ranges, 2
+        ranges = (
+            torch.tensor([0, rows], dtype=torch.int32, device=self.device)
+            .expand(num_ranges, 2)
+            .contiguous()
         )
         args = dict(
-            q_ranges=ranges.contiguous(),
-            k_ranges=ranges.contiguous(),
+            q_ranges=ranges,
+            k_ranges=ranges,
             mask_types=0,
             max_seqlen_q=rows,
             max_seqlen_k=rows,
@@ -493,103 +459,77 @@ class TestFFARangeDeterministicHost(_SingleGpuDetTestBase):
         q, k, v = self._qkv(rows, rows, group=1, num_head_kv=32)
         lse = torch.zeros(rows, q.shape[1], device=self.device)
         with _with_2cta(True), self.assertRaises(ValueError):
-            _flex_flash_attn_bwd(
-                q,
-                k,
-                v,
-                q,
-                lse,
-                q,
-                **args,
-                disable_bwd_dkv_atomic_reduction=False,
-                deterministic=True,
+            self._det_bwd(
+                (q, k, v, q, lse, q), args, disable_bwd_dkv_atomic_reduction=False
             )
 
-    def test_debug_mode_rejects_max_seqlen_k_below_the_longest_k_range(self):
-        seed_test_case("test_debug_mode_rejects_max_seqlen_k_below_longest_k")
-        relations: Relations = [
+        dbg_rels: Relations = [
             ([0, 100], [0, 300], MT_MAP.full),
             ([50, 200], [300, 400], MT_MAP.causal),
         ]
-        q, k, v = self._qkv(200, 400, group=1)
-        lse = torch.zeros(200, q.shape[1], device=self.device)
-        args = self._range_args(relations)
+        q_d, k_d, v_d = self._qkv(200, 400, group=1)
+        lse_d = torch.zeros(200, q_d.shape[1], device=self.device)
+        dbg_args = {**self._range_args(dbg_rels), "max_seqlen_k": 299}
         with switch_env("MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE", True):
             with self.assertRaises(ValueError):
-                _flex_flash_attn_bwd(
-                    q,
-                    k,
-                    v,
-                    q,
-                    lse,
-                    q,
-                    **{**args, "max_seqlen_k": 299},
+                self._det_bwd(
+                    (q_d, k_d, v_d, q_d, lse_d, q_d),
+                    dbg_args,
                     disable_bwd_dkv_atomic_reduction=False,
-                    deterministic=True,
                 )
 
-    def test_persistent_budget_validation(self):
-        seed_test_case("test_persistent_budget_validation")
+    def test_persistent_budget_and_path_activation(self):
+        seed_test_case("test_persistent_budget_and_path_activation")
         relations, total_q, total_k = _shared_k_relations()
-        prob = self._bwd_problem(relations, total_q, total_k, group=2)
+        tensors, args = self._bwd_inputs(relations, total_q, total_k, group=2)
+        q, k, v = tensors[:3]
+        with record_fwd_kernels() as built_fwd:
+            self._det_fwd(q, k, v, relations)
+        self.assertTrue(built_fwd[0].deterministic)
+        with record_bwd_kernels() as built_bwd:
+            self._det_bwd(tensors, args, disable_bwd_dkv_atomic_reduction=False)
+        self.assertTrue(built_bwd[0].deterministic)
+
         with _with_2cta(True), self.assertRaises(ValueError):
-            prob.run(
+            self._det_bwd(
+                tensors,
+                args,
                 disable_bwd_dkv_atomic_reduction=False,
                 sm_margin=self.num_sm - 1,
             )
         with self.assertRaises(ValueError):
-            _flex_flash_attn_fwd(
-                prob.q,
-                prob.k,
-                prob.v,
-                **prob.args,
-                disable_fwd_atomic_reduction=False,
-                deterministic=True,
-                sm_margin=self.num_sm,
-            )
+            self._det_fwd(q, k, v, relations, sm_margin=self.num_sm)
         with _with_2cta(True):
-            grads = prob.run(
+            grads = self._det_bwd(
+                tensors,
+                args,
                 disable_bwd_dkv_atomic_reduction=False,
                 sm_margin=self.num_sm - 2,
             )
         assert_sequence_close(
-            grads, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, "budget_validation"
+            grads, _ref_grads(q, k, v, tensors[5], relations), _GRAD_NAMES, _GRAD_TOL
         )
-
-    def test_deterministic_path_activation(self):
-        """The single whitebox check of this suite: ``deterministic=True``
-        reaches the fwd and the bwd range kernels, so the bitwise tests cannot
-        pass on a path that ignores the flag."""
-        seed_test_case("test_deterministic_path_activation")
-        relations, total_q, total_k = _shared_k_relations()
-        q, k, v = self._qkv(total_q, total_k, group=2)
-        with record_fwd_kernels() as built_fwd:
-            self._det_fwd(q, k, v, relations)
-        self.assertTrue(built_fwd[0].deterministic)
-        prob = self._bwd_problem(relations, total_q, total_k, group=2)
-        with record_bwd_kernels() as built_bwd:
-            prob.run(disable_bwd_dkv_atomic_reduction=False)
-        self.assertTrue(built_bwd[0].deterministic)
 
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestFFARangeDeterministicFwd(_RangeDetHelpers, CuteDSLDistTestBase):
+class TestFFARangeDeterministicSweeps(_RangeDetHelpers, CuteDSLDistTestBase):
     @with_run_in_mp
     @parameterize(
         "case",
         [
-            _FwdCase(group=2, out_dtype=torch.float32),
-            _FwdCase(group=2, out_dtype=torch.bfloat16),
-            _FwdCase(group=4, out_dtype=torch.float32, pack_gqa=True),
+            _FwdCase("fp32", _overlapping_cov4),
+            _FwdCase("bf16", _overlapping_cov4, out_dtype=torch.bfloat16),
+            _FwdCase("pack_gqa", _overlapping_cov4, group=4, pack_gqa=True),
+            _FwdCase("empty_unpacked", _empty_keyless_relations),
+            _FwdCase("empty_packed", _empty_keyless_relations, pack_gqa=True),
+            _FwdCase("many_256", _many_overlapping_relations, group=1, num_head_kv=1),
         ],
     )
     def test_fwd_bitwise_across_margins(self, case: _FwdCase):
-        test_case = f"[fwd_bitwise][{case}]"
+        test_case = f"[fwd_det][{case.name}]"
         seed_test_case(test_case)
-        relations, total_q, total_k = overlapping_relations(
-            [129, 300, 1000, 77], coverage=4, mask_types=[MT_MAP.full, MT_MAP.causal]
-        )
-        q, k, v = self._qkv(total_q, total_k, case.group)
+        relations, total_q, total_k = case.fixture()
+        q, k, v = self._qkv(total_q, total_k, case.group, num_head_kv=case.num_head_kv)
         kwargs = {"out_dtype": case.out_dtype, "pack_gqa": case.pack_gqa}
         out, lse = _bitwise_across_margins(
             lambda m: self._det_fwd(q, k, v, relations, sm_margin=m, **kwargs),
@@ -599,32 +539,148 @@ class TestFFARangeDeterministicFwd(_RangeDetHelpers, CuteDSLDistTestBase):
         )
         self.assertEqual(out.dtype, case.out_dtype)
         out_ref, lse_ref = _ref_fwd(q, k, v, relations)
-        _assert_fwd_close(out, lse, out_ref, lse_ref, test_case=test_case)
+        _assert_fwd_close(out, lse, out_ref, lse_ref, test_case)
 
     @with_run_in_mp
-    @parameterize("pack_gqa", [False, True])
-    def test_fwd_empty_and_keyless_relations(self, pack_gqa: bool):
-        test_case = f"[fwd_empty_keyless][pack={pack_gqa}]"
-        seed_test_case(test_case)
-        q, k, v = self._qkv(420, 900, group=2)
-        out, lse = _bitwise_across_margins(
-            lambda m: self._det_fwd(
-                q, k, v, _EMPTY_KEYLESS_RELATIONS, sm_margin=m, pack_gqa=pack_gqa
+    @parameterize(
+        "case",
+        [
+            _BwdCase("dq_1cta", _overlapping_cov3),
+            _BwdCase("dq_2cta_cat", _overlapping_cov3, 2, cat_gqa=True, two_cta=True),
+            _BwdCase("dkv_mha", _shared_k_relations, direct_dkv=False),
+            _BwdCase("dkv_gqa", _shared_k_relations, 2, direct_dkv=False),
+            _BwdCase(
+                "dkv_2cta_cat",
+                _shared_k_relations,
+                2,
+                cat_gqa=True,
+                two_cta=True,
+                direct_dkv=False,
             ),
-            self._margins(),
-            _OUT_LSE_NAMES,
+            _BwdCase(
+                "disjoint_q_1cta",
+                _disjoint_q_relations,
+                direct_dkv=False,
+                disable_fwd_atomic=True,
+            ),
+            _BwdCase(
+                "disjoint_q_2cta",
+                _disjoint_q_relations,
+                2,
+                cat_gqa=True,
+                two_cta=True,
+                direct_dkv=False,
+                disable_fwd_atomic=True,
+            ),
+            _BwdCase(
+                "rm_1cta_hd128",
+                _merged_k_relations,
+                2,
+                cat_gqa=True,
+                range_merge="plan",
+            ),
+            _BwdCase(
+                "rm_2cta_hd128",
+                _merged_k_relations,
+                2,
+                cat_gqa=True,
+                two_cta=True,
+                range_merge="plan",
+            ),
+            _BwdCase(
+                "rm_1cta_hd64",
+                _merged_k_relations,
+                2,
+                cat_gqa=True,
+                head_dim=64,
+                range_merge="plan",
+            ),
+            _BwdCase(
+                "straddle_plain",
+                _straddling_relations,
+                2,
+                cat_gqa=True,
+                direct_dkv=False,
+            ),
+            _BwdCase(
+                "straddle_rm_2cta",
+                _straddling_relations,
+                2,
+                cat_gqa=True,
+                two_cta=True,
+                range_merge="auto",
+            ),
+            _BwdCase(
+                "rm_2cta_pair_handoff",
+                _merged_k_relations_2cta_adjacent,
+                2,
+                cat_gqa=True,
+                two_cta=True,
+                range_merge="auto",
+            ),
+            _BwdCase(
+                "many_256_2cta",
+                _many_overlapping_relations,
+                1,
+                1,
+                two_cta=True,
+                direct_dkv=False,
+            ),
+            _BwdCase("many_212_rm", _many_merged_k_relations, 1, 1, range_merge="plan"),
+            _BwdCase("empty_keyless", _empty_keyless_relations),
+        ],
+    )
+    def test_bwd_bitwise_across_margins(self, case: _BwdCase):
+        test_case = f"[bwd_det][{case.name}]"
+        seed_test_case(test_case)
+        relations, total_q, total_k = case.fixture()
+        tensors, args = self._bwd_inputs(
+            relations,
+            total_q,
+            total_k,
+            case.group,
+            head_dim=case.head_dim,
+            num_head_kv=case.num_head_kv,
+            disable_fwd_atomic=case.disable_fwd_atomic,
+        )
+        rm_arg: bool | RangeMergePlan = False
+        if case.range_merge == "auto":
+            rm_arg = True
+        elif case.range_merge == "plan":
+            rm_arg = plan_range_merge_bwd(
+                args["q_ranges"], args["k_ranges"], args["mask_types"]
+            )
+        kwargs = dict(
+            disable_fwd_atomic_reduction=case.disable_fwd_atomic,
+            disable_bwd_dkv_atomic_reduction=case.direct_dkv,
+            cat_gqa=case.cat_gqa,
+            range_merge=rm_arg,
+        )
+        with _with_2cta(case.two_cta):
+            first = _bitwise_across_margins(
+                lambda m: self._det_bwd(tensors, args, sm_margin=m, **kwargs),
+                self._margins(),
+                _GRAD_NAMES,
+                test_case,
+            )
+        assert_sequence_close(
+            first,
+            _ref_grads(tensors[0], tensors[1], tensors[2], tensors[5], relations),
+            _GRAD_NAMES,
+            _GRAD_TOL,
             test_case,
         )
-        out_ref, lse_ref = _ref_fwd(q, k, v, _EMPTY_KEYLESS_RELATIONS)
-        _assert_fwd_close(out, lse, out_ref, lse_ref, test_case=test_case)
 
 
 @unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestFFARangeDeterministicFwdSingleRank(_SingleRankDetTestBase):
+class TestFFARangeDeterministicIntegration(_RangeDetHelpers, CuteDSLDistTestBase):
+    @property
+    def world_size(self) -> int:
+        return 1
+
     @with_run_in_mp
-    def test_fwd_caller_buffer_accumulation_with_sink(self):
-        test_case = "[fwd_caller_buffer_sink]"
-        seed_test_case(test_case)
+    def test_caller_buffers_and_single_cluster(self):
+        seed_test_case("[det_caller_buffers_and_single_cluster]")
         first_call: Relations = [
             ([0, 140], [0, 300], MT_MAP.full),
             ([70, 260], [300, 500], MT_MAP.causal),
@@ -634,12 +690,11 @@ class TestFFARangeDeterministicFwdSingleRank(_SingleRankDetTestBase):
             ([128, 129], [800, 820], MT_MAP.full),
         ]
         q, k, v = self._qkv(260, 820, group=2)
-        num_head = q.shape[1]
-        sink = torch.randn(2, num_head, device=self.device, dtype=torch.float32)
+        sink = torch.randn(2, q.shape[1], device=self.device, dtype=torch.float32)
 
-        def run(sm_margin: int):
-            out = torch.zeros(260, num_head, _HEAD_DIM, device=self.device)
-            lse = torch.full((260, num_head), -math.inf, device=self.device)
+        def run_fwd_acc(sm_margin: int):
+            out = torch.zeros(260, q.shape[1], _HEAD_DIM, device=self.device)
+            lse = torch.full((260, q.shape[1]), -math.inf, device=self.device)
             self._det_fwd(q, k, v, first_call, out=out, lse=lse, sm_margin=sm_margin)
             self._det_fwd(
                 q, k, v, second_call, out=out, lse=lse, sink=sink, sm_margin=sm_margin
@@ -647,442 +702,147 @@ class TestFFARangeDeterministicFwdSingleRank(_SingleRankDetTestBase):
             return out, lse
 
         out, lse = _bitwise_across_margins(
-            run, self._margins(), _OUT_LSE_NAMES, test_case
+            run_fwd_acc, self._margins(), _OUT_LSE_NAMES, "[fwd_caller_acc]"
         )
         out_ref, lse_ref = _ref_fwd(q, k, v, first_call + second_call, sink)
-        _assert_fwd_close(out, lse, out_ref, lse_ref, test_case=test_case)
+        _assert_fwd_close(out, lse, out_ref, lse_ref, "[fwd_caller_acc]")
 
-    @with_run_in_mp
-    def test_fwd_many_overlapping_ranges_bitwise(self):
-        test_case = "[fwd_many_overlapping_ranges]"
-        seed_test_case(test_case)
-        relations, total_q, total_k = _many_overlapping_relations()
-        q, k, v = self._qkv(total_q, total_k, group=1, num_head_kv=1)
-        out, lse = _bitwise_across_margins(
-            lambda m: self._det_fwd(q, k, v, relations, sm_margin=m),
-            self._margins(),
-            _OUT_LSE_NAMES,
-            test_case,
+        disjoint_rels, dq_tot_q, dq_tot_k = _disjoint_q_relations()
+        tensors, args = self._bwd_inputs(
+            disjoint_rels, dq_tot_q, dq_tot_k, 2, disable_fwd_atomic=True
         )
-        out_ref, lse_ref = _ref_fwd(q, k, v, relations)
-        _assert_fwd_close(out, lse, out_ref, lse_ref, test_case=test_case)
-
-
-@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestFFARangeDeterministicBwd(_RangeDetHelpers, CuteDSLDistTestBase):
-    def _check_bwd_bitwise_and_close(
-        self,
-        case: _BwdCase,
-        relations: Relations,
-        total_q: int,
-        total_k: int,
-        test_case: str,
-    ) -> Sequence[torch.Tensor]:
-        prob = self._bwd_problem(
-            relations, total_q, total_k, case.group, head_dim=case.head_dim
-        )
-        kwargs = dict(
-            disable_bwd_dkv_atomic_reduction=case.direct_dkv,
-            cat_gqa=case.cat_gqa,
-            range_merge=case.range_merge,
-        )
-        with _with_2cta(case.two_cta):
-            first = _bitwise_across_margins(
-                lambda m: prob.run(sm_margin=m, **kwargs),
-                self._margins(),
-                _GRAD_NAMES,
-                test_case,
-            )
-        assert_sequence_close(
-            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
-        )
-        return first
-
-    @with_run_in_mp
-    @parameterize(
-        "case",
-        [
-            _BwdCase(group=1, two_cta=False),
-            _BwdCase(group=2, cat_gqa=True, two_cta=True),
-        ],
-    )
-    def test_bwd_dq_bitwise_across_margins(self, case: _BwdCase):
-        test_case = f"[bwd_dq_bitwise][{case}]"
-        seed_test_case(test_case)
-        relations, total_q, total_k = overlapping_relations(
-            [129, 300, 1000, 77], coverage=3, mask_types=[MT_MAP.full, MT_MAP.causal]
-        )
-        self._check_bwd_bitwise_and_close(case, relations, total_q, total_k, test_case)
-
-    @with_run_in_mp
-    @parameterize(
-        "case",
-        [
-            _BwdCase(group=1, two_cta=False, direct_dkv=False),
-            _BwdCase(group=2, two_cta=False, direct_dkv=False),
-            _BwdCase(group=2, cat_gqa=True, two_cta=True, direct_dkv=False),
-        ],
-    )
-    def test_bwd_reduced_dkv_bitwise_across_margins(self, case: _BwdCase):
-        test_case = f"[bwd_reduced_dkv_bitwise][{case}]"
-        seed_test_case(test_case)
-        self._check_bwd_bitwise_and_close(case, *_shared_k_relations(), test_case)
-
-    @with_run_in_mp
-    @parameterize(
-        "case",
-        [
-            _BwdCase(group=1, two_cta=False, direct_dkv=False),
-            _BwdCase(group=2, cat_gqa=True, two_cta=True, direct_dkv=False),
-        ],
-    )
-    def test_bwd_disjoint_q_dense_dqacc_bitwise_across_margins(self, case: _BwdCase):
-        test_case = f"[bwd_disjoint_dense_dqacc][{case}]"
-        seed_test_case(test_case)
-        prob = self._bwd_problem(
-            _DISJOINT_Q_RELATIONS,
-            1260,
-            1180,
-            case.group,
-            head_dim=case.head_dim,
-            disable_fwd_atomic=True,
-        )
-        with _with_2cta(case.two_cta):
-            first = _bitwise_across_margins(
-                lambda m: prob.run(
-                    sm_margin=m,
-                    disable_fwd_atomic_reduction=True,
-                    disable_bwd_dkv_atomic_reduction=case.direct_dkv,
-                    cat_gqa=case.cat_gqa,
-                ),
-                self._margins(),
-                _GRAD_NAMES,
-                test_case,
-            )
-        assert_sequence_close(
-            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
-        )
-
-    @with_run_in_mp
-    @parameterize(
-        "case",
-        [
-            _BwdCase(group=2, cat_gqa=True, two_cta=False, head_dim=128),
-            _BwdCase(group=2, cat_gqa=True, two_cta=True, head_dim=128),
-            _BwdCase(group=2, cat_gqa=True, two_cta=False, head_dim=64),
-        ],
-    )
-    def test_bwd_range_merge_bitwise_across_margins(self, case: _BwdCase):
-        test_case = f"[bwd_range_merge][{case}]"
-        seed_test_case(test_case)
-        prob = self._bwd_problem(
-            *_merged_k_relations(), case.group, head_dim=case.head_dim
-        )
-        plan = plan_range_merge_bwd(
-            prob.args["q_ranges"], prob.args["k_ranges"], prob.args["mask_types"]
-        )
-        with _with_2cta(case.two_cta):
-            first = _bitwise_across_margins(
-                lambda m: prob.run(
-                    sm_margin=m,
-                    range_merge=plan,
-                    cat_gqa=case.cat_gqa,
-                    disable_bwd_dkv_atomic_reduction=True,
-                ),
-                self._margins(),
-                _GRAD_NAMES,
-                test_case,
-            )
-        assert_sequence_close(
-            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
-        )
-
-    @with_run_in_mp
-    @parameterize(
-        "case",
-        [
-            _BwdCase(group=2, cat_gqa=True, two_cta=False, direct_dkv=False),
-            _BwdCase(
-                group=2, cat_gqa=True, two_cta=True, direct_dkv=True, range_merge=True
-            ),
-        ],
-    )
-    def test_bwd_straddling_masked_blocks_all_mask_types(self, case: _BwdCase):
-        test_case = f"[bwd_straddling_masked][merge={case.range_merge}]"
-        seed_test_case(test_case)
-        self._check_bwd_bitwise_and_close(
-            case, _STRADDLING_RELATIONS, 800, 1150, test_case
-        )
-
-
-@unittest.skipUnless(is_sm100_family(), SM100_FAMILY_REQUIRED)
-class TestFFARangeDeterministicBwdSingleRank(_SingleRankDetTestBase):
-    @with_run_in_mp
-    def test_bwd_empty_and_keyless_relations(self):
-        test_case = "[bwd_empty_keyless]"
-        seed_test_case(test_case)
-        prob = self._bwd_problem(_EMPTY_KEYLESS_RELATIONS, 420, 900, group=1)
-        first = _bitwise_across_margins(
-            lambda m: prob.run(sm_margin=m),
-            self._margins(),
-            _GRAD_NAMES,
-            test_case,
-        )
-        assert_sequence_close(
-            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
-        )
-
-    @with_run_in_mp
-    def test_bwd_disjoint_dq_caller_buffer_accumulation(self):
-        test_case = "[bwd_disjoint_dq_acc]"
-        seed_test_case(test_case)
-        prob = self._bwd_problem(
-            _DISJOINT_Q_RELATIONS, 1260, 1180, 2, disable_fwd_atomic=True
-        )
-        dq_base = torch.randn(prob.q.shape, device=self.device, dtype=torch.float32)
+        dq_base = torch.randn(tensors[0].shape, device=self.device, dtype=torch.float32)
+        bwd_kw = dict(disable_fwd_atomic_reduction=True, cat_gqa=True)
         with _with_2cta(True):
-            first = prob.run(
-                sm_margin=0, disable_fwd_atomic_reduction=True, cat_gqa=True
-            )
-            dq_acc_0 = prob.run(
-                sm_margin=0,
-                disable_fwd_atomic_reduction=True,
-                cat_gqa=True,
-                dq=dq_base.clone(),
+            base_dq = self._det_bwd(tensors, args, sm_margin=0, **bwd_kw)[0]
+            acc_0 = self._det_bwd(
+                tensors, args, sm_margin=0, dq=dq_base.clone(), **bwd_kw
             )[0]
-            dq_acc_1 = prob.run(
+            acc_1 = self._det_bwd(
+                tensors,
+                args,
                 sm_margin=self.num_sm - 2,
-                disable_fwd_atomic_reduction=True,
-                cat_gqa=True,
                 dq=dq_base.clone(),
+                **bwd_kw,
             )[0]
-        assert_equal(
-            dq_acc_0,
-            dq_acc_1,
-            test_case=f"{test_case}[across_margins]",
-            print_no_mismatch=False,
-        )
+        assert_equal(acc_0, acc_1, test_case="[bwd_dq_acc]", print_no_mismatch=False)
         assert_close(
-            dq_acc_0,
-            dq_base + first[0],
+            acc_0,
+            dq_base + base_dq,
             atol=1e-4,
             rtol=1e-4,
-            test_case=f"{test_case}[sum]",
+            test_case="[bwd_dq_acc_sum]",
             print_rank=-1,
             print_no_mismatch=False,
         )
 
-    @with_run_in_mp
-    def test_bwd_range_merge_2cta_adjacent_pair_conflicts_bitwise(self):
-        test_case = "[bwd_2cta_adjacent_conflicts]"
-        seed_test_case(test_case)
-        prob = self._bwd_problem(*_merged_k_relations_2cta_adjacent(), group=2)
-        with _with_2cta(True):
-            first = _bitwise_across_margins(
-                lambda m: prob.run(
-                    sm_margin=m,
-                    range_merge=True,
-                    cat_gqa=True,
-                    disable_bwd_dkv_atomic_reduction=True,
-                ),
-                self._margins(),
-                _GRAD_NAMES,
-                test_case,
-            )
-        assert_sequence_close(
-            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
-        )
-
-    @with_run_in_mp
-    def test_bwd_many_overlapping_ranges_bitwise(self):
-        test_case = "[bwd_many_overlapping]"
-        seed_test_case(test_case)
-        prob = self._bwd_problem(
-            *_many_overlapping_relations(),
-            group=1,
-            num_head_kv=1,
-            disable_fwd_atomic=True,
-        )
-        with _with_2cta(True):
-            first = _bitwise_across_margins(
-                lambda m: prob.run(sm_margin=m, disable_bwd_dkv_atomic_reduction=False),
-                self._margins(),
-                _GRAD_NAMES,
-                test_case,
-            )
-        assert_sequence_close(
-            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
-        )
-
-    @with_run_in_mp
-    def test_bwd_many_merged_k_ranges_bitwise(self):
-        test_case = "[bwd_many_merged_k]"
-        seed_test_case(test_case)
-        prob = self._bwd_problem(
-            *_many_merged_k_relations(_MANY_RANGES), group=1, num_head_kv=1
-        )
-        plan = plan_range_merge_bwd(
-            prob.args["q_ranges"], prob.args["k_ranges"], prob.args["mask_types"]
-        )
-        first = _bitwise_across_margins(
-            lambda m: prob.run(
-                sm_margin=m,
-                range_merge=plan,
-                disable_bwd_dkv_atomic_reduction=True,
-            ),
-            self._margins(),
-            _GRAD_NAMES,
-            test_case,
-        )
-        assert_sequence_close(
-            first, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
-        )
-
-    @with_run_in_mp
-    def test_bwd_empty_ranges_single_cluster(self):
-        test_case = "[bwd_empty_single_cluster]"
-        seed_test_case(test_case)
-        relations: Relations = (
+        sparse_empty: Relations = (
             [([0, 128], [0, 200], MT_MAP.full)]
             + [([150, 150], [200, 200], MT_MAP.full)] * 61
             + [([160, 288], [220, 420], MT_MAP.causal)]
         )
-        prob = self._bwd_problem(relations, 300, 440, group=1, num_head_kv=1)
-        # num_sm - 1 leaves a single CTA, which only holds one cluster when
-        # the launch is single-cluster.
+        sc_t, sc_args = self._bwd_inputs(sparse_empty, 300, 440, group=1, num_head_kv=1)
         with _with_2cta(False):
-            grads = prob.run(
+            grads = self._det_bwd(
+                sc_t,
+                sc_args,
                 disable_bwd_dkv_atomic_reduction=False,
                 sm_margin=self.num_sm - 1,
             )
         assert_sequence_close(
-            grads, prob.ref_grads(), _GRAD_NAMES, _GRAD_TOL, test_case
+            grads,
+            _ref_grads(sc_t[0], sc_t[1], sc_t[2], sc_t[5], sparse_empty),
+            _GRAD_NAMES,
+            _GRAD_TOL,
         )
 
     @with_run_in_mp
-    def test_bwd_reads_no_range_back_outside_debug_mode(self):
-        seed_test_case("[bwd_no_range_sync]")
-        # Built up front: copying host range lists to the device syncs.
-        ordered = self._bwd_problem(
-            *overlapping_relations([129, 300], coverage=2, mask_types=[MT_MAP.full]),
-            group=1,
+    def test_sync_free_public_api_and_cuda_graphs(self):
+        seed_test_case("[det_sync_public_api_graphs]")
+        ov_rels, ov_q, ov_k = overlapping_relations(
+            [129, 300], coverage=3, mask_types=[MT_MAP.full, MT_MAP.causal]
         )
-        disjoint = self._bwd_problem(
-            [
-                ([3, 140], [0, 300], MT_MAP.full),
-                ([145, 420], [300, 620], MT_MAP.causal),
-            ],
-            430,
-            620,
-            group=1,
+        ord_t, ord_args = self._bwd_inputs(ov_rels, ov_q, ov_k, group=1)
+        dis_rels, dis_q, dis_k = _disjoint_q_relations()
+        dis_t, dis_args = self._bwd_inputs(
+            dis_rels, dis_q, dis_k, group=2, disable_fwd_atomic=True
         )
 
-        def run_all() -> None:
-            ordered.run(disable_bwd_dkv_atomic_reduction=False)
-            disjoint.run(
+        def run_sync_check() -> None:
+            self._det_bwd(ord_t, ord_args, disable_bwd_dkv_atomic_reduction=False)
+            self._det_bwd(
+                dis_t,
+                dis_args,
                 disable_bwd_dkv_atomic_reduction=True,
                 disable_fwd_atomic_reduction=True,
+                cat_gqa=True,
             )
 
         with switch_env("MAGI_ATTENTION_FFA_CUTEDSL_DEBUG_MODE", False):
-            run_all()
+            run_sync_check()
             torch.cuda.synchronize()
             with sync_debug_error():
-                run_all()
+                run_sync_check()
 
-    @with_run_in_mp
-    def test_public_api_fwd_bwd_bitwise_with_sink(self):
-        test_case = "[public_api_fwd_bwd_sink]"
-        seed_test_case(test_case)
-        relations, total_q, total_k = _shared_k_relations()
-        q, k, v = self._qkv(total_q, total_k, group=2)
+        sk_rels, sk_q, sk_k = _shared_k_relations()
+        q, k, v = self._qkv(sk_q, sk_k, group=2)
         sink = torch.randn(2, q.shape[1], device=self.device, dtype=torch.float32)
         do = torch.randn_like(q)
 
-        def run(sm_margin: int):
-            q_in = q.detach().clone().requires_grad_()
-            k_in = k.detach().clone().requires_grad_()
-            v_in = v.detach().clone().requires_grad_()
-            sink_in = sink.detach().clone().requires_grad_()
+        def run_public(sm_margin: int):
+            q_i, k_i, v_i, s_i = (
+                t.detach().clone().requires_grad_() for t in (q, k, v, sink)
+            )
             out, meta = flex_flash_attn_func(
-                q_in,
-                k_in,
-                v_in,
-                **self._range_args(relations),
-                sink=sink_in,
+                q_i,
+                k_i,
+                v_i,
+                **self._range_args(sk_rels),
+                sink=s_i,
                 deterministic=True,
                 sm_margin=sm_margin,
             )
             out.backward(do)
-            return (
-                out.detach(),
-                meta.lse,
-                q_in.grad,
-                k_in.grad,
-                v_in.grad,
-                sink_in.grad,
-            )
+            return out.detach(), meta.lse, q_i.grad, k_i.grad, v_i.grad, s_i.grad
 
         with _with_2cta(True):
-            _bitwise_across_margins(run, self._margins(), _PUBLIC_API_NAMES, test_case)
+            _bitwise_across_margins(
+                run_public, self._margins(), _PUBLIC_API_NAMES, "[public_api_sink]"
+            )
 
-    @with_run_in_mp
-    def test_cuda_graph_replay_packed_fwd_bitwise(self):
-        test_case = "[cuda_graph][packed_fwd]"
-        seed_test_case(test_case)
-        relations, total_q, total_k = overlapping_relations(
-            [129, 300], coverage=3, mask_types=[MT_MAP.full, MT_MAP.causal]
-        )
-        args = self._range_args(relations)
-
-        def fn(q, k, v):
-            return _flex_flash_attn_fwd(
-                q,
-                k,
-                v,
-                **args,
+        ov_args = self._range_args(ov_rels)
+        f0 = self._qkv(ov_q, ov_k, group=4)
+        f1 = self._qkv(ov_q, ov_k, group=4)
+        assert_cuda_graph_matches_eager(
+            lambda qi, ki, vi: _flex_flash_attn_fwd(
+                qi,
+                ki,
+                vi,
+                **ov_args,
                 disable_fwd_atomic_reduction=False,
                 deterministic=True,
                 pack_gqa=True,
-            )
-
-        data0 = self._qkv(total_q, total_k, group=4)
-        data1 = self._qkv(total_q, total_k, group=4)
-        assert_cuda_graph_matches_eager(
-            fn,
-            data0,
-            [data1, data0, data1],
-            test_case=test_case,
+            ),
+            f0,
+            [f1, f0, f1],
+            test_case="[cuda_graph_packed_fwd]",
         )
 
-    @with_run_in_mp
-    def test_cuda_graph_replay_bwd_disjoint_dense_dqacc_bitwise(self):
-        test_case = "[cuda_graph][bwd_disjoint_dense_dqacc]"
-        seed_test_case(test_case)
-        args = self._range_args(_GRAPH_DISJOINT_RELATIONS)
-
-        def fn(*tensors):
-            return _flex_flash_attn_bwd(
-                *tensors,
-                **args,
-                disable_bwd_dkv_atomic_reduction=False,
-                deterministic=True,
-                disable_fwd_atomic_reduction=True,
-                cat_gqa=True,
-            )[:3]
-
-        prob0 = self._bwd_problem(
-            _GRAPH_DISJOINT_RELATIONS, 850, 520, group=2, disable_fwd_atomic=True
-        )
-        prob1 = self._bwd_problem(
-            _GRAPH_DISJOINT_RELATIONS, 850, 520, group=2, disable_fwd_atomic=True
+        dis_t2, _ = self._bwd_inputs(
+            dis_rels, dis_q, dis_k, group=2, disable_fwd_atomic=True
         )
         with _with_2cta(True):
             assert_cuda_graph_matches_eager(
-                fn,
-                prob0.tensors(),
-                [prob1.tensors(), prob0.tensors(), prob1.tensors()],
-                test_case=test_case,
+                lambda *ts: self._det_bwd(
+                    ts,
+                    dis_args,
+                    disable_bwd_dkv_atomic_reduction=False,
+                    disable_fwd_atomic_reduction=True,
+                    cat_gqa=True,
+                ),
+                dis_t,
+                [dis_t2, dis_t, dis_t2],
+                test_case="[cuda_graph_bwd_disjoint]",
             )
 
 
