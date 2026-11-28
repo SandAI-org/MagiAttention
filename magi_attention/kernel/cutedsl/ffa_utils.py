@@ -152,7 +152,6 @@ def validate_range_feature_support(
     has_mask_mod: bool,
     has_block_sparse: bool,
     has_user_score_mod: bool,
-    deterministic: bool = False,
     bwd_head_dim: int | None = None,
     sm_margin: int = 0,
 ) -> None:
@@ -168,8 +167,7 @@ def validate_range_feature_support(
     ``has_user_score_mod`` is a caller-provided score_mod; softcap is native
     to the SM100/SM110 kernels and does not count.
 
-    ``deterministic`` and ``bwd_head_dim`` apply only to backward. Q/k ranges
-    do not support deterministic backward. RangeMerge does not support the
+    ``bwd_head_dim`` applies only to backward. RangeMerge does not support the
     mainloop for head dimension 192, which uses two CTAs and a single pipeline
     stage for Q and Qt.
     """
@@ -182,10 +180,6 @@ def validate_range_feature_support(
         )
     if not has_ranges:
         return
-    if deterministic:
-        raise NotImplementedError(
-            "deterministic backward with q/k ranges is unsupported"
-        )
     if range_merge and not range_merge_unique_writer:
         raise ValueError(
             "RangeMerge requires the non-atomic path "
@@ -207,6 +201,65 @@ def validate_range_feature_support(
         )
     if range_merge and bwd_head_dim is not None and bwd_head_dim > 128:
         raise NotImplementedError("bwd RangeMerge is not supported at head_dim 192")
+
+
+def validate_persistent_grid(*, num_sm: int, sm_margin: int, cluster_size: int) -> None:
+    if num_sm - sm_margin < cluster_size:
+        raise ValueError(
+            f"a persistent q/k-range launch needs num_sm - sm_margin ({num_sm} - "
+            f"{sm_margin}) to hold one cluster of cluster_size={cluster_size} CTAs"
+        )
+
+
+def validate_range_deterministic(
+    *,
+    major_arch: int,
+    has_block_sparse: bool,
+    head_dim: int,
+    head_dim_v: int,
+    num_sm: int,
+    cluster_size: int,
+    max_tickets: int,
+    max_writer: int,
+) -> None:
+    """Tile counter adds one final claim per cluster; caller keeps K range lengths <= max_seqlen_k."""
+    if major_arch not in (10, 11):
+        raise NotImplementedError("deterministic q/k ranges require SM100/SM110")
+    if has_block_sparse:
+        raise NotImplementedError(
+            "deterministic q/k ranges cannot be combined with block sparsity"
+        )
+    if head_dim != head_dim_v or head_dim not in (64, 128):
+        raise NotImplementedError(
+            "deterministic q/k ranges support head_dim == head_dim_v in "
+            f"(64, 128), got head_dim={head_dim}, head_dim_v={head_dim_v}"
+        )
+    if max_tickets + num_sm // cluster_size > 2**31 - 1:
+        raise ValueError(
+            f"deterministic q/k ranges: {max_tickets} tiles overflow the int32 "
+            "tile counter"
+        )
+    if max_writer > 2**31 - 1:
+        raise ValueError(
+            f"deterministic q/k ranges: writer number {max_writer} overflows int32"
+        )
+
+
+def alloc_write_order_tensors(
+    total_rows: int,
+    tile_rows: int,
+    num_heads: int,
+    max_grid_ctas: int,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_blocks = (total_rows + tile_rows - 1) // tile_rows + 1
+    write_order = torch.zeros(
+        num_blocks, num_heads, 2, dtype=torch.int32, device=device
+    )
+    write_last = torch.zeros(
+        max_grid_ctas, num_blocks, dtype=torch.int32, device=device
+    )
+    return write_order, write_last
 
 
 # ---------------------------------------------------------------------------
@@ -271,6 +324,13 @@ class BwdGqaFold:
         """One tile accumulates dK/dV over every q head of its kv head, so
         dK/dV have a single writer per (K tile, kv head)."""
         return self.kv_group == 1 or self.head_loop
+
+    @property
+    def dkv_writer_stride(self) -> int:
+        """dK/dV writers of one range per (K tile, kv head): one per scratch
+        head, or a single one when a tile covers every q head. The range write
+        order numbers the writers of a range with this stride."""
+        return 1 if self.covers_all_qheads else self.kv_group
 
 
 def select_bwd_gqa_fold(

@@ -34,7 +34,7 @@ from quack.cute_dsl_utils import ParamsBase
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
-from . import sm100_utils
+from . import range_write_order, sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
@@ -164,23 +164,19 @@ class FFABwdSm100:
         self.scheduling_mode = (
             SchedulingMode.DYNAMIC if is_persistent else SchedulingMode.STATIC
         )
-        if is_persistent:
-            assert not deterministic, "Persistent backward does not support determinism"
         self.sched_stages = 1
 
         self.disable_bwd_dkv_atomic_reduction = disable_bwd_dkv_atomic_reduction
         self.range_merge = range_merge
         self.use_dense_dqacc_for_ranges = use_dense_dqacc_for_ranges
         if use_dense_dqacc_for_ranges:
-            assert not deterministic
             assert not range_merge
         if range_merge:
             assert self.use_per_range_mask, "bwd RangeMerge rides the per-range entry"
             assert disable_bwd_dkv_atomic_reduction, (
                 "bwd RangeMerge exists to direct-store shared-K dKV; merged K "
-                "groups must be sorted pairwise disjoint"
+                "groups must be pairwise disjoint"
             )
-            assert not deterministic
             assert not use_dense_dqacc_for_ranges
             assert score_mod is None and score_mod_bwd is None and mask_mod is None
             # The 2-CTA hdim-192 mainloop fuses the Q and Qt loads into one
@@ -828,12 +824,20 @@ class FFABwdSm100:
         mdV_semaphore: Optional[cute.Tensor] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        mNumBatches: Optional[cute.Tensor] = None,
         max_seqlen_k: Int32 | None = None,
-        sm_margin: Int32 | None = None,
+        # CTA cap of the persistent range grid: the SM count of the launch
+        # device minus the SM reservation.
+        max_grid_ctas: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
         mTileCounter: Optional[cute.Tensor] = None,
         # tanh cap magnitude; required iff has_softcap.
         softcap: Float32 | None = None,
+        mdQWriteOrder: Optional[cute.Tensor] = None,
+        mdQLast: Optional[cute.Tensor] = None,
+        dq_writer_stride: Int32 | None = None,
+        mdKVWriteOrder: Optional[cute.Tensor] = None,
+        mdKVLast: Optional[cute.Tensor] = None,
         aux_tensors: Optional[list] = None,
         # Block-sparse tensors (Q direction - for iterating m_blocks per n_block):
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
@@ -869,16 +873,35 @@ class FFABwdSm100:
         assert (mQRanges is None) == (
             mKRanges is None
         ), "mQRanges and mKRanges must be passed together"
-        assert not (
-            self.deterministic and mQRanges is not None
-        ), "deterministic dQ ordering is defined on batched sequences only"
+        self.dense_deterministic = self.deterministic and mQRanges is None
+        self.range_deterministic = self.deterministic and mQRanges is not None
+        self.range_dq_write_order = (
+            self.range_deterministic and not self.use_dense_dqacc_for_ranges
+        )
+        self.range_dq_semaphore = (
+            self.range_deterministic and self.use_dense_dqacc_for_ranges
+        )
+        assert (
+            mdQWriteOrder is not None
+            and mdQLast is not None
+            and dq_writer_stride is not None
+        ) == self.range_dq_write_order, (
+            "the dQ write order comes with overlapping deterministic ranges"
+        )
+        if const_expr(self.range_deterministic):
+            assert self.scheduling_mode == SchedulingMode.DYNAMIC
+            assert self.same_hdim_kv and self.tile_hdim in (64, 128)
+            assert blocksparse_tensors is None
+        self.dq_pair_handoff = (
+            self.range_dq_write_order and self.range_merge and self.use_2cta_instrs
+        )
         self.is_varlen_k = mKRanges is not None or mSeqUsedK is not None
         self.is_varlen_q = mQRanges is not None or mSeqUsedQ is not None
         # Batched GQA reduces the q heads of a kv head from separate CTAs and
         # orders them on per-(K block, kv head) semaphores; a fold that covers
         # every q head reduces them inside one CTA and needs no order.
         self.deterministic_dkv = (
-            self.deterministic and not self.gqa_fold.covers_all_qheads
+            self.dense_deterministic and not self.gqa_fold.covers_all_qheads
         )
         if const_expr(self.gqa_fold.pack_factor > 1):
             assert mQRanges is not None, "pack_factor > 1 is defined on q/k ranges only"
@@ -897,6 +920,19 @@ class FFABwdSm100:
         )
 
         self.ranges_dkv_tma = mKRanges is not None and not self.dKV_postprocess
+        self.range_dkv_write_order = self.range_deterministic and self.dKV_postprocess
+        assert (
+            mdKVWriteOrder is not None and mdKVLast is not None
+        ) == self.range_dkv_write_order, (
+            "the dK/dV write order comes with reduced dK/dV"
+        )
+        assert not (
+            self.range_merge and self.range_dkv_write_order
+        ), "RangeMerge backward uses direct dK/dV stores without dK/dV write order"
+        if const_expr(self.range_dq_write_order or self.range_dkv_write_order):
+            assert (
+                self.gqa_fold.pack_factor == 1 and not self.is_local
+            ), "the write order numbers writers of unpacked, non-local ranges"
 
         mdQacc, mdK, mdV = [
             cutedsl_utils.assume_tensor_aligned(t) for t in (mdQacc, mdK, mdV)
@@ -975,7 +1011,7 @@ class FFABwdSm100:
 
         # (b, n, block, stage) -> (block, stage, n, b)
         semaphore_transpose = [2, 3, 1, 0]
-        if const_expr(self.deterministic):
+        if const_expr(self.dense_deterministic or self.range_dq_semaphore):
             assert mdQ_semaphore is not None
             mdQ_semaphore = layout_utils.select(mdQ_semaphore, mode=semaphore_transpose)
 
@@ -1324,15 +1360,15 @@ class FFABwdSm100:
             raise NotImplementedError(
                 "persistent bwd needs the range prefix scheduler; dense has none"
             )
-        elif const_expr(self.deterministic):
+        elif const_expr(self.dense_deterministic):
             TileScheduler = SingleTileLPTBwdScheduler  # type: ignore[assignment]
         else:
             TileScheduler = SingleTileScheduler  # type: ignore[assignment]
         if const_expr(self.spt_override is None):
-            self.spt = (self.maybe_causal or self.is_local) and self.deterministic
+            self.spt = (self.maybe_causal or self.is_local) and self.dense_deterministic
         else:
             assert self.spt_override is not None
-            self.spt = self.spt_override and self.deterministic
+            self.spt = self.spt_override and self.dense_deterministic
 
         needs_range_quota = (
             mKRanges is not None
@@ -1371,6 +1407,7 @@ class FFABwdSm100:
             tile_shape_mn=self.cta_tiler[:2],  # (tile_n, tile_m)
             cluster_shape_mn=self.cluster_shape_mnk[:2],
             mQRanges=mKRanges,
+            mNumBatches=mNumBatches,
             max_outer_range_width=(
                 max_seqlen_k if const_expr(needs_range_quota) else None
             ),
@@ -1379,10 +1416,12 @@ class FFABwdSm100:
             qhead_per_kvhead_packgqa=1,
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
-            sm_margin=sm_margin,
+            max_grid_ctas=max_grid_ctas,
+            # Range write orders require monotonic (relation, head, K-tile) launch order.
             lpt=self.spt,
-            head_swizzle=self.deterministic,
+            head_swizzle=self.dense_deterministic,
             mTileCounter=mTileCounter,
+            claim_first_tile=self.range_deterministic,
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(
             tile_sched_args, scheduling_mode=self.scheduling_mode
@@ -1407,7 +1446,8 @@ class FFABwdSm100:
 
         dynamic_schedule = self.scheduling_mode == SchedulingMode.DYNAMIC
         sched_mbar_size = 2 * self.sched_stages if dynamic_schedule else 0
-        sched_response_size = self.sched_stages if dynamic_schedule else 0
+        sched_response_size = 4 * self.sched_stages if dynamic_schedule else 0
+        dq_pair_mbar_size = 2 if self.dq_pair_handoff else 0
 
         sdK_bytes = cute.size_in_bytes(self.dk_dtype, self.sdK_layout)
         sdV_bytes = cute.size_in_bytes(self.dv_dtype, self.sdV_layout)
@@ -1465,9 +1505,11 @@ class FFABwdSm100:
                 # Tmem dealloc cluster mbarrier
                 tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
                 tile_done_mbar_ptr: cute.struct.MemRange[Int64, 1]
-                # DYNAMIC schedule: full/empty mbarriers and the response slot
+                # DYNAMIC schedule: full/empty mbarriers and 16B response slots
                 sched_mbar_ptr: cute.struct.MemRange[cutlass.Int64, sched_mbar_size]
-                sched_response: cute.struct.MemRange[Int32, sched_response_size]
+                sched_response: cute.struct.Align[
+                    cute.struct.MemRange[Int32, sched_response_size], 16
+                ]
                 # Tmem holding buffer ptr
                 tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
 
@@ -1479,6 +1521,7 @@ class FFABwdSm100:
                 dS_cluster_full_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
                 dS_cluster_leader_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
                 dQacc_empty_mbar_ptr: cute.struct.MemRange[cutlass.Int64, 1]
+                dq_pair_mbar_ptr: cute.struct.MemRange[cutlass.Int64, dq_pair_mbar_size]
 
                 # --- smem tensors ---
 
@@ -1564,11 +1607,14 @@ class FFABwdSm100:
                 # Tmem dealloc cluster mbarrier
                 tmem_dealloc_mbar_ptr: cute.struct.MemRange[Int64, 1]
                 tile_done_mbar_ptr: cute.struct.MemRange[Int64, 1]
-                # DYNAMIC schedule: full/empty mbarriers and the response slot
+                # DYNAMIC schedule: full/empty mbarriers and 16B response slots
                 sched_mbar_ptr: cute.struct.MemRange[cutlass.Int64, sched_mbar_size]
-                sched_response: cute.struct.MemRange[Int32, sched_response_size]
+                sched_response: cute.struct.Align[
+                    cute.struct.MemRange[Int32, sched_response_size], 16
+                ]
                 # Tmem holding buffer ptr
                 tmem_holding_buf_ptr: cute.struct.MemRange[Int32, 1]
+                dq_pair_mbar_ptr: cute.struct.MemRange[cutlass.Int64, dq_pair_mbar_size]
 
                 # --- smem tensors ---
 
@@ -1761,6 +1807,24 @@ class FFABwdSm100:
             mdQ_semaphore,
             mdK_semaphore,
             mdV_semaphore,
+            (
+                range_write_order.WriteOrderTensors(
+                    mdQWriteOrder,
+                    mdQLast,
+                    dq_writer_stride,
+                )
+                if const_expr(self.range_dq_write_order)
+                else None
+            ),
+            (
+                range_write_order.WriteOrderTensors(
+                    mdKVWriteOrder,
+                    mdKVLast,
+                    Int32(self.gqa_fold.dkv_writer_stride),
+                )
+                if const_expr(self.range_dkv_write_order)
+                else None
+            ),
             mQRanges,
             mKRanges,
             mSeqUsedQ,
@@ -1812,11 +1876,8 @@ class FFABwdSm100:
         ).launch(
             grid=grid_dim,
             block=[self.threads_per_cta, 1, 1],
-            # DYNAMIC publishes tiles with st.async.shared::cluster, which needs
-            # a cluster launch even for one CTA.
             cluster=self.cluster_shape_mnk
             if cute.size(self.cluster_shape_mnk) > 1
-            or self.scheduling_mode == SchedulingMode.DYNAMIC
             else None,
             smem=self.shared_storage.size_in_bytes(),  # type: ignore[attr-defined]
             stream=stream,
@@ -1845,6 +1906,8 @@ class FFABwdSm100:
         mdQ_semaphore: Optional[cute.Tensor],
         mdK_semaphore: Optional[cute.Tensor],
         mdV_semaphore: Optional[cute.Tensor],
+        dq_write_order: Optional[range_write_order.WriteOrderTensors],
+        dkv_write_order: Optional[range_write_order.WriteOrderTensors],
         mQRanges: Optional[cute.Tensor],
         mKRanges: Optional[cute.Tensor],
         mSeqUsedQ: Optional[cute.Tensor],
@@ -1969,6 +2032,9 @@ class FFABwdSm100:
             dS_cluster_empty_mbar_ptr = None
             dS_cluster_leader_mbar_ptr = None
             dQacc_empty_mbar_ptr = None
+        dq_pair_mbar_ptr = (
+            storage.dq_pair_mbar_ptr.data_ptr() if self.dq_pair_handoff else None
+        )
 
         # Pipeline mbarrier ptrs
         S_mbar_ptr = storage.S_mbar_ptr.data_ptr()
@@ -2010,6 +2076,12 @@ class FFABwdSm100:
                 cute.arch.mbarrier_init(dS_cluster_full_mbar_ptr, 1)
                 cute.arch.mbarrier_init(dS_cluster_empty_mbar_ptr, 1)
                 cute.arch.mbarrier_init(dS_cluster_leader_mbar_ptr, 2)
+
+        if const_expr(self.dq_pair_handoff):
+            assert dq_pair_mbar_ptr is not None
+            if warp_idx == 4:
+                for i in range(2):
+                    cute.arch.mbarrier_init(dq_pair_mbar_ptr + i, 1)
 
         if const_expr(self.cluster_reduce_dQ):
             if warp_idx == 4:
@@ -2420,22 +2492,10 @@ class FFABwdSm100:
             ) * self.cta_group_size
             assert self.tile_scheduler_cls is SingleTileVarlenScheduler
             dynamic_state = DynamicState.create(
-                pipeline=pipeline.PipelineClcFetchAsync.create(
-                    barrier_storage=storage.sched_mbar_ptr.data_ptr(),
-                    num_stages=self.sched_stages,
-                    producer_group=ThreadCooperativeGroup(1),
-                    consumer_group=ThreadCooperativeGroup(
-                        cute.arch.WARP_SIZE * sched_consumer_warps
-                    ),
-                    tx_count=4,
-                    cta_layout_vmnk=cta_layout_vmnk,
-                ),
-                consumer_state=pipeline.make_pipeline_state(
-                    pipeline.PipelineUserType.Consumer, self.sched_stages
-                ),
-                producer_state=pipeline.make_pipeline_state(
-                    pipeline.PipelineUserType.Producer, self.sched_stages
-                ),
+                barrier_storage=storage.sched_mbar_ptr.data_ptr(),
+                num_stages=self.sched_stages,
+                num_consumer_threads=cute.arch.WARP_SIZE * sched_consumer_warps,
+                cta_layout_vmnk=cta_layout_vmnk,
                 response_ptr=storage.sched_response.data_ptr(),
             )
             tile_scheduler = SingleTileVarlenScheduler.create(
@@ -2721,6 +2781,9 @@ class FFABwdSm100:
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
                 tile_done_mbar_ptr=tile_done_mbar_ptr,
+                dkv_write_order=dkv_write_order,
+                mQRanges=mQRanges,
+                mKRanges=mKRanges,
                 is_print_block=is_print_block,
             )
 
@@ -2763,6 +2826,10 @@ class FFABwdSm100:
                 blocksparse_tensors,
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
+                dq_write_order=dq_write_order,
+                dq_pair_mbar_ptr=dq_pair_mbar_ptr,
+                mQRanges=mQRanges,
+                mKRanges=mKRanges,
                 is_print_block=is_print_block,
             )
 
@@ -2936,17 +3003,12 @@ class FFABwdSm100:
 
                         dS_cluster_phase ^= 1
 
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
+            work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
     def scheduler_warp(self, tile_scheduler: SingleTileVarlenScheduler):
         """DYNAMIC producer: publish each tile ahead of the one being processed."""
-        work_tile = tile_scheduler.initial_work_tile_info()
-        while work_tile.is_valid_tile:
-            tile_scheduler.prefetch_next_work()
-            work_tile = tile_scheduler.advance_to_next_work()
-        tile_scheduler.producer_tail()
+        tile_scheduler.run_dynamic_producer()
 
     @cute.jit
     def consume_schedule_only(self, tile_scheduler: TileSchedulerProtocol):
@@ -4172,8 +4234,7 @@ class FFABwdSm100:
             any_tile_processed = any_tile_processed or process_tile
 
             # Advance to next KV tile
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
+            work_tile = tile_scheduler.advance_to_next_work()
 
         # --- Producer tail ---
         # Drain used pipelines once at exit; TMA tails leave pending transactions.
@@ -5032,8 +5093,7 @@ class FFABwdSm100:
                             )
 
             # Advance to next KV tile
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
+            work_tile = tile_scheduler.advance_to_next_work()
 
         # --- Producer tail ---
 
@@ -5209,6 +5269,9 @@ class FFABwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
         tile_done_mbar_ptr: Optional[cute.Pointer] = None,
+        dkv_write_order: Optional[range_write_order.WriteOrderTensors] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         # --- Set up thread info ---
@@ -5415,6 +5478,7 @@ class FFABwdSm100:
         consumer_state_dPsum = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Consumer, self.dO_stage
         )
+        dkv_folded = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -5426,6 +5490,7 @@ class FFABwdSm100:
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
             seqlen_info = SeqlenInfoCls(batch_idx)
             n_block_for_bounds = n_block // self.cluster_shape_mnk[0]
+            attn_type: Optional[Int32] = None
             if const_expr(self.range_merge):
                 # Track deferred dS commits across pairs; reset for each tile.
                 merge_iter_idx = Int32(0)
@@ -5442,7 +5507,6 @@ class FFABwdSm100:
                     seqlen_info, n_block_for_bounds, attn_type
                 )
             else:
-                attn_type = Int32(MT_MAP.full)
                 m_block_min, m_block_max = block_info.get_m_block_min_max(
                     seqlen_info, n_block_for_bounds
                 )
@@ -5617,6 +5681,7 @@ class FFABwdSm100:
                 mask = AttentionMaskCls(seqlen_info)
                 n_block_for_cluster = n_block // self.cta_group_size
                 if const_expr(self.use_per_range_mask):
+                    assert attn_type is not None
                     mask_fn = partial(
                         mask.apply_mask_sm100_transposed_per_range,
                         tScS_t2r=tScS_t2r,
@@ -6583,6 +6648,49 @@ class FFABwdSm100:
                         pipeline_dS.producer_commit(producer_state_dS)
                     producer_state_dS.advance()
 
+            if const_expr(self.range_dkv_write_order):
+                dkv_left = Int32(0)
+                dkv_right = Int32(0)
+                dkv_left_weight = Int32(0)
+                dkv_right_weight = Int32(0)
+                dkv_writer = Int32(0)
+                head_kv = Int32(0)
+                if process_tile:
+                    assert (
+                        dkv_write_order is not None
+                        and mQRanges is not None
+                        and mKRanges is not None
+                    )
+                    (
+                        dkv_left,
+                        dkv_right,
+                        dkv_left_weight,
+                        dkv_right_weight,
+                        dkv_writer,
+                        head_kv,
+                        dkv_folded,
+                    ) = range_write_order.dkv_wait(
+                        dkv_write_order,
+                        block_info,
+                        mQRanges,
+                        mKRanges,
+                        mMaskTypes,
+                        seqlen_info,
+                        attn_type,
+                        n_block // self.cta_group_size,
+                        head_idx,
+                        batch_idx,
+                        dkv_folded,
+                        tidx < cute.arch.WARP_SIZE,
+                        tidx == 0,
+                        self.gqa_fold.covers_all_qheads,
+                        self.gqa_fold.kv_group,
+                    )
+                    self.compute_sync_barrier.arrive_and_wait()
+                    # Order tidx == 0's acquire before WG leader warps' TMA async-proxy ops.
+                    if warp_idx % 4 == 0:
+                        cute.arch.fence_proxy("async.global")
+
             # --- Epilogue for dKV store ---
 
             if process_tile:
@@ -6632,6 +6740,26 @@ class FFABwdSm100:
                     "K",
                     is_print_block=is_print_block,
                 )
+
+            if const_expr(self.range_dkv_write_order):
+                if process_tile:
+                    # read=False waits for the writes at the destination.
+                    if warp_idx % 4 == 0:
+                        cute.arch.cp_async_bulk_wait_group(0, read=False)
+                    self.compute_sync_barrier.arrive_and_wait()
+                    if tidx == 0:
+                        assert dkv_write_order is not None
+                        cute.arch.fence_acq_rel_gpu()
+                        range_write_order.arrive_blocks(
+                            dkv_write_order,
+                            dkv_left,
+                            dkv_right,
+                            head_kv,
+                            dkv_writer,
+                            dkv_left_weight,
+                            dkv_right_weight,
+                            self.cta_group_size,
+                        )
 
             # Zero dK/dV when no Q tile contributes to this KV tile; the
             # accumulating postprocess path leaves untouched rows at zero.
@@ -6720,8 +6848,7 @@ class FFABwdSm100:
                     cute.arch.mbarrier_arrive(tile_done_mbar_ptr)
 
             # Advance to next KV tile
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
+            work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
     def _dq_semaphore_lock_value(
@@ -6754,6 +6881,60 @@ class FFABwdSm100:
                     lock_value = curr_dq_write_order_full[sparse_iter - curr_q_cnt]
         return lock_value
 
+    def _dq_store_wait_read(
+        self, read_flag: bool, stage: int, n_reduce_stages: int
+    ) -> bool:
+        """``read`` argument of the bulk wait that follows reduce stage ``stage``
+        of an M tile.
+
+        The dQ write order arrives once the reductions of an M tile reached
+        dQacc. With one sdQacc stage every bulk wait retires the only pending
+        store, so the last stage waits for the destination writes and the tile
+        needs no separate drain.
+        """
+        return read_flag and not (
+            self.range_dq_write_order
+            and self.sdQacc_stage == 1
+            and stage == n_reduce_stages - 1
+        )
+
+    @cute.jit
+    def _dq_write_order_arrive(
+        self,
+        dq_write_order: range_write_order.WriteOrderTensors,
+        dq_writer: Int32,
+        left: Int32,
+        right: Int32,
+        left_weight: Int32,
+        right_weight: Int32,
+        q_head: Int32,
+        tidx: Int32,
+        is_tma_warp: cutlass.Boolean,
+    ) -> None:
+        """Arrive on the dQ blocks of one M tile once its reductions reached dQacc.
+
+        ``read=False`` waits for the writes at the destination. With one
+        sdQacc stage the last reduce stage of the tile already waited that way
+        (``_dq_store_wait_read``).
+        """
+        if const_expr(self.sdQacc_stage > 1):
+            if is_tma_warp:
+                cute.arch.cp_async_bulk_wait_group(0, read=False)
+            self.reduce_sync_barrier.arrive_and_wait()
+        if tidx == 0:
+            if left_weight > 0 or right_weight > 0:
+                cute.arch.fence_acq_rel_gpu()
+                range_write_order.arrive_blocks(
+                    dq_write_order,
+                    left,
+                    right,
+                    q_head,
+                    dq_writer,
+                    left_weight,
+                    right_weight,
+                    self.cta_group_size,
+                )
+
     @cute.jit
     def dQacc_reduce(
         self,
@@ -6772,6 +6953,10 @@ class FFABwdSm100:
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
+        dq_write_order: Optional[range_write_order.WriteOrderTensors] = None,
+        dq_pair_mbar_ptr: Optional[cute.Pointer] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        mKRanges: Optional[cute.Tensor] = None,
         is_print_block: bool = False,
     ):
         # --- Set up thread info ---
@@ -6890,7 +7075,13 @@ class FFABwdSm100:
         dQ_tma_store_producer_state = ffa_pipeline.make_pipeline_state(
             pipeline.PipelineUserType.Producer, self.sdQacc_stage
         )
-        read_flag = const_expr(not self.deterministic)
+        # Semaphore releases rely on full per-store waits; write order arrives
+        # follow a full drain of each m tile.
+        read_flag = const_expr(
+            not (self.dense_deterministic or self.range_dq_semaphore)
+        )
+        dq_folded = Int32(0)
+        pair_handoff = Int32(0) if const_expr(self.dq_pair_handoff) else None
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -6902,6 +7093,13 @@ class FFABwdSm100:
             n_block, head_idx, batch_idx, _ = work_tile.tile_idx
             n_block_cta_group = n_block // self.cta_group_size  # for 2CTA
             seqlen_info = SeqlenInfoCls(batch_idx)
+            if const_expr(self.range_dq_write_order):
+                assert dq_write_order is not None and mQRanges is not None
+                assert mKRanges is not None
+                dq_writer = range_write_order.writer_number(
+                    dq_write_order, batch_idx, n_block_cta_group
+                )
+            attn_type: Optional[Int32] = None
             if const_expr(self.range_merge):
                 assert mMaskTypes is not None and mCuBatches is not None
                 # pair CSR is walked in the dQ dump loop.
@@ -6916,10 +7114,41 @@ class FFABwdSm100:
                     seqlen_info, n_block_cta_group, attn_type
                 )
             else:
-                attn_type = Int32(MT_MAP.full)
                 m_block_min, m_block_max = block_info.get_m_block_min_max(
                     seqlen_info, n_block_cta_group
                 )
+
+            group_has_block_overlap = cutlass.Boolean(False)
+            if const_expr(self.range_dq_write_order):
+                assert (
+                    dq_write_order is not None
+                    and mQRanges is not None
+                    and mKRanges is not None
+                )
+                if const_expr(self.range_merge):
+                    if tidx == 0 and pair_cnt > 1:
+                        group_has_block_overlap = (
+                            range_write_order.dq_group_has_block_overlap(
+                                mQRanges, pair_beg, pair_cnt, self.tile_m
+                            )
+                        )
+                if dq_folded < batch_idx:
+                    range_write_order.fold_dq_last(
+                        block_info,
+                        mQRanges,
+                        mKRanges,
+                        mMaskTypes,
+                        mCuBatches,
+                        dq_write_order.mLast,
+                        cute.arch.block_idx()[0],
+                        dq_folded,
+                        batch_idx,
+                        dq_write_order.writer_stride,
+                        tidx,
+                        num_reduce_threads,
+                    )
+                    self.reduce_sync_barrier.arrive_and_wait()
+                    dq_folded = batch_idx
 
             delay_semaphore_release = (
                 not self.tile_hdim == 192 and not self.use_block_sparsity
@@ -6959,7 +7188,7 @@ class FFABwdSm100:
                     m_block_max=m_block_max,
                 )
                 process_tile = loop_count > Int32(0)
-            if const_expr(self.deterministic and self.use_block_sparsity):
+            if const_expr(self.dense_deterministic and self.use_block_sparsity):
                 assert blocksparse_tensors is not None
                 if const_expr(blocksparse_tensors.dq_write_order is not None):
                     assert blocksparse_tensors.dq_write_order is not None
@@ -7020,11 +7249,17 @@ class FFABwdSm100:
                         cute.group_modes(gdQacc_grid, 0, 2),
                     )
 
-                if const_expr(self.deterministic):
+                if const_expr(self.dense_deterministic):
                     assert mdQ_semaphore is not None
                     mdQ_semaphore_cur = mdQ_semaphore[
                         None, None, scratch_head, batch_idx
                     ]
+                elif const_expr(self.range_dq_semaphore):
+                    assert mdQ_semaphore is not None
+                    mdQ_semaphore_cur = cute.domain_offset(
+                        (seqlen_info.padded_offset_q // self.tile_m, 0),
+                        mdQ_semaphore[None, None, scratch_head, 0],
+                    )
 
                 # --- Debug print ---
 
@@ -7149,6 +7384,8 @@ class FFABwdSm100:
                 # and derive actual m_block from Q_IDX/FULL_Q_IDX tensors.
                 # For dense: iterate m_block_min..m_block_max directly.
                 if const_expr(self.range_merge):
+                    if const_expr(self.dq_pair_handoff):
+                        seen_active_pair = cutlass.Boolean(False)
                     for pj in cutlass.range(pair_cnt, unroll=1):
                         seqlen_pair = SeqlenInfoCls(
                             pair_beg + pj, k_batch_idx=batch_idx
@@ -7158,7 +7395,20 @@ class FFABwdSm100:
                         lo_p, hi_p = block_info.get_m_block_min_max_per_range(
                             seqlen_pair, n_block_cta_group, attn_type_pair
                         )
-                        if hi_p > lo_p:
+                        pair_active = hi_p > lo_p
+                        if const_expr(self.dq_pair_handoff):
+                            assert (
+                                dq_pair_mbar_ptr is not None
+                                and pair_handoff is not None
+                            )
+                            needs_handoff = pair_active and seen_active_pair
+                            seen_active_pair = seen_active_pair or pair_active
+                            if needs_handoff and tidx == 0:
+                                cutedsl_utils.mbarrier_arrive_peer_release_cluster(
+                                    dq_pair_mbar_ptr + (pair_handoff & 1),
+                                    cta_rank_in_cluster ^ 1,
+                                )
+                        if pair_active:
                             process_tile = cutlass.Boolean(True)
                         assert mdQacc_tma is not None
                         gdQacc_grid = self._dQacc_reduce_grid(
@@ -7172,8 +7422,40 @@ class FFABwdSm100:
                             cute.group_modes(gdQacc_grid, 0, 2),
                         )
 
+                        if const_expr(self.range_dq_write_order):
+                            group_pairs = (
+                                pair_beg,
+                                pair_beg + pj,
+                                pair_beg + pair_cnt,
+                            )
+
                         for it in cutlass.range(hi_p - lo_p, unroll=1):
                             m_block = lo_p + it
+                            if const_expr(self.range_dq_write_order):
+                                (
+                                    dq_left,
+                                    dq_right,
+                                    dq_wait_left,
+                                    dq_wait_right,
+                                    dq_left_weight,
+                                    dq_right_weight,
+                                ) = range_write_order.dq_plan(
+                                    dq_write_order,
+                                    block_info,
+                                    batch_idx,
+                                    n_block_cta_group,
+                                    seqlen_pair,
+                                    attn_type_pair,
+                                    m_block,
+                                    lo_p,
+                                    hi_p,
+                                    mQRanges=mQRanges,
+                                    is_waiter=tidx == 0,
+                                    mMaskTypes=mMaskTypes,
+                                    group_pairs=group_pairs,
+                                    seqlen_k_group=seqlen_info.seqlen_k,
+                                    group_has_block_overlap=group_has_block_overlap,
+                                )
 
                             # Wait for tdQ(i) to be full
                             pipeline_dQ.consumer_wait(dQ_consumer_state)
@@ -7195,6 +7477,11 @@ class FFABwdSm100:
 
                             n_reduce_stages = const_expr(cute.size(tdQrdQ, mode=[1]))
                             for stage in cutlass.range_constexpr(n_reduce_stages):
+                                store_read = const_expr(
+                                    self._dq_store_wait_read(
+                                        read_flag, stage, n_reduce_stages
+                                    )
+                                )
                                 smem_idx = dQ_tma_store_producer_state.index
                                 rows_valid = (
                                     self._q_rows(seqlen_pair.seqlen_q)
@@ -7229,8 +7516,36 @@ class FFABwdSm100:
 
                                 cute.arch.fence_view_async_shared()
 
+                                if const_expr(self.range_dq_write_order and stage == 0):
+                                    if tidx == 0:
+                                        assert dq_write_order is not None
+                                        range_write_order.wait_blocks(
+                                            dq_write_order,
+                                            dq_left,
+                                            dq_right,
+                                            scratch_head,
+                                            dq_wait_left,
+                                            dq_wait_right,
+                                        )
+                                # Placed after TMEM consumer_release so peer sync does not block dQ MMA.
+                                if const_expr(self.dq_pair_handoff and stage == 0):
+                                    if needs_handoff and it == 0 and tidx == 0:
+                                        assert (
+                                            dq_pair_mbar_ptr is not None
+                                            and pair_handoff is not None
+                                        )
+                                        cutedsl_utils.mbarrier_wait_acquire_cluster(
+                                            dq_pair_mbar_ptr + (pair_handoff & 1),
+                                            (pair_handoff >> 1) & 1,
+                                        )
+                                        cute.arch.fence_proxy("async.global")
+
                                 # Sync before S2G copy
                                 self.reduce_sync_barrier.arrive_and_wait()
+                                # Order tidx == 0's acquire before is_tma_warp's async-proxy bulk ops.
+                                if const_expr(self.range_dq_write_order and stage == 0):
+                                    if is_tma_warp:
+                                        cute.arch.fence_proxy("async.global")
 
                                 # dQacc[physical_q_row, hd_col] += partial_dQ[q_row, hd_col]
                                 if const_expr(not self.use_2cta_instrs):
@@ -7244,7 +7559,7 @@ class FFABwdSm100:
                                         )
                                         cute.arch.cp_async_bulk_commit_group()
                                         cute.arch.cp_async_bulk_wait_group(
-                                            self.sdQacc_stage - 1, read=read_flag
+                                            self.sdQacc_stage - 1, read=store_read
                                         )
                                 else:
                                     if is_tma_warp:
@@ -7273,12 +7588,30 @@ class FFABwdSm100:
                                             )
                                         cute.arch.cp_async_bulk_commit_group()
                                         cute.arch.cp_async_bulk_wait_group(
-                                            self.sdQacc_stage - 1, read=read_flag
+                                            self.sdQacc_stage - 1, read=store_read
                                         )
 
                                 # Sync after S2G copy
                                 self.reduce_sync_barrier.arrive_and_wait()
                                 dQ_tma_store_producer_state.advance()
+
+                            if const_expr(self.range_dq_write_order):
+                                self._dq_write_order_arrive(
+                                    dq_write_order,
+                                    dq_writer,
+                                    dq_left,
+                                    dq_right,
+                                    dq_left_weight,
+                                    dq_right_weight,
+                                    scratch_head,
+                                    tidx,
+                                    is_tma_warp,
+                                )
+
+                        if const_expr(self.dq_pair_handoff):
+                            assert pair_handoff is not None
+                            if needs_handoff:
+                                pair_handoff += 1
 
                 else:
                     for iter_idx in cutlass.range(loop_count, unroll=1):
@@ -7297,6 +7630,39 @@ class FFABwdSm100:
                                 m_block_max=m_block_max,
                             )
                             m_block_oob_upper = m_block >= m_block_max
+
+                        if const_expr(self.range_dq_semaphore):
+                            dq_sem_lock = Int32(0)
+                            if n_block_cta_group > 0:
+                                n_min_m, _ = block_info.get_n_block_min_max_seqlens(
+                                    seqlen_info.seqlen_q,
+                                    seqlen_info.seqlen_k,
+                                    m_block,
+                                    attn_type,
+                                )
+                                dq_sem_lock = n_block_cta_group - n_min_m
+                        if const_expr(self.range_dq_write_order):
+                            (
+                                dq_left,
+                                dq_right,
+                                dq_wait_left,
+                                dq_wait_right,
+                                dq_left_weight,
+                                dq_right_weight,
+                            ) = range_write_order.dq_plan(
+                                dq_write_order,
+                                block_info,
+                                batch_idx,
+                                n_block_cta_group,
+                                seqlen_info,
+                                attn_type,
+                                m_block,
+                                m_block_min,
+                                m_block_max,
+                                mQRanges=mQRanges,
+                                is_waiter=tidx == 0,
+                                mMaskTypes=mMaskTypes,
+                            )
 
                         # Wait for tdQ(i) to be full
                         pipeline_dQ.consumer_wait(dQ_consumer_state)
@@ -7320,6 +7686,11 @@ class FFABwdSm100:
 
                         n_reduce_stages = const_expr(cute.size(tdQrdQ, mode=[1]))
                         for stage in cutlass.range_constexpr(n_reduce_stages):
+                            store_read = const_expr(
+                                self._dq_store_wait_read(
+                                    read_flag, stage, n_reduce_stages
+                                )
+                            )
                             # R2S copy dQacc (bulk path)
                             smem_idx = dQ_tma_store_producer_state.index
                             if const_expr(not self.dQ_rowmajor_accum):
@@ -7374,7 +7745,7 @@ class FFABwdSm100:
 
                             # Semaphore acquire
                             # TODO: review the logics
-                            if const_expr(self.deterministic and stage == 0):
+                            if const_expr(self.dense_deterministic and stage == 0):
                                 if not m_block_oob_upper:
                                     lock_value = self._dq_semaphore_lock_value(
                                         iter_idx,
@@ -7393,9 +7764,34 @@ class FFABwdSm100:
                                         cta_rank_in_cluster,
                                         lock_value,
                                     )
+                            if const_expr(self.range_dq_semaphore and stage == 0):
+                                cutedsl_utils.wait_eq(
+                                    mdQ_semaphore_cur[(m_block, None)].iterator,
+                                    tidx,
+                                    cta_rank_in_cluster,
+                                    dq_sem_lock,
+                                )
+                            if const_expr(self.range_dq_write_order and stage == 0):
+                                if tidx == 0:
+                                    assert dq_write_order is not None
+                                    range_write_order.wait_blocks(
+                                        dq_write_order,
+                                        dq_left,
+                                        dq_right,
+                                        scratch_head,
+                                        dq_wait_left,
+                                        dq_wait_right,
+                                    )
 
                             # Sync before S2G copy
                             self.reduce_sync_barrier.arrive_and_wait()
+                            # Order prior acquire before is_tma_warp's async-proxy bulk ops.
+                            if const_expr(
+                                (self.range_dq_write_order or self.range_dq_semaphore)
+                                and stage == 0
+                            ):
+                                if is_tma_warp:
+                                    cute.arch.fence_proxy("async.global")
 
                             # S2G copy dQacc (batched interleaved fp32 accumulator)
                             if const_expr(not self.dQ_rowmajor_accum):
@@ -7433,7 +7829,7 @@ class FFABwdSm100:
                                     )
                                     cute.arch.cp_async_bulk_commit_group()
                                     cute.arch.cp_async_bulk_wait_group(
-                                        self.sdQacc_stage - 1, read=read_flag
+                                        self.sdQacc_stage - 1, read=store_read
                                     )
                                 elif is_tma_warp:
                                     cute.arch.cp_async_bulk_wait_group(
@@ -7468,10 +7864,9 @@ class FFABwdSm100:
                                         )
                                     cute.arch.cp_async_bulk_commit_group()
                                     # Retire only the buffer this stage is about to
-                                    # reuse; the tail drain after the m_block loop
-                                    # retires the rest.
+                                    # reuse; later drains retire the rest.
                                     cute.arch.cp_async_bulk_wait_group(
-                                        self.sdQacc_stage - 1, read=read_flag
+                                        self.sdQacc_stage - 1, read=store_read
                                     )
                                 elif is_tma_warp:
                                     cute.arch.cp_async_bulk_wait_group(
@@ -7484,7 +7879,7 @@ class FFABwdSm100:
 
                             # TODO: review the logics
                             if const_expr(
-                                self.deterministic
+                                (self.dense_deterministic or self.range_dq_semaphore)
                                 and stage == 0
                                 and delay_semaphore_release
                             ):
@@ -7511,7 +7906,8 @@ class FFABwdSm100:
                         # NOTE: arrive_inc calls red_release which issues membar
                         # TODO: review the logics
                         if const_expr(
-                            self.deterministic and not delay_semaphore_release
+                            (self.dense_deterministic or self.range_dq_semaphore)
+                            and not delay_semaphore_release
                         ):
                             if const_expr(
                                 self.sdQacc_stage > 1 and not self.tile_hdim == 192
@@ -7529,12 +7925,30 @@ class FFABwdSm100:
                                     1,
                                 )
 
+                        if const_expr(self.range_dq_write_order):
+                            self._dq_write_order_arrive(
+                                dq_write_order,
+                                dq_writer,
+                                dq_left,
+                                dq_right,
+                                dq_left_weight,
+                                dq_right_weight,
+                                scratch_head,
+                                tidx,
+                                is_tma_warp,
+                            )
+
                 if process_tile:
-                    if is_tma_warp:
-                        cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
-                    self.reduce_sync_barrier.arrive_and_wait()
+                    # The write order path fully drains every m tile before its arrive.
+                    if const_expr(not self.range_dq_write_order):
+                        if is_tma_warp:
+                            cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
+                        self.reduce_sync_barrier.arrive_and_wait()
                     # final semaphore release
-                    if const_expr(self.deterministic and delay_semaphore_release):
+                    if const_expr(
+                        (self.dense_deterministic or self.range_dq_semaphore)
+                        and delay_semaphore_release
+                    ):
                         cutedsl_utils.arrive_inc(
                             mdQ_semaphore_cur[(m_block_max - 1, None)].iterator,
                             tidx,
@@ -7543,7 +7957,7 @@ class FFABwdSm100:
                         )
 
                 if const_expr(
-                    self.deterministic
+                    self.dense_deterministic
                     and not self.spt
                     and not self.use_block_sparsity
                     and block_info.window_size_left is not None
@@ -7561,11 +7975,7 @@ class FFABwdSm100:
                             1,
                         )
 
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
-
-        if const_expr(not self.deterministic):
-            cute.arch.cp_async_bulk_wait_group(0, read=True)
+            work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
     def epilogue_dK_or_dV_tma(
@@ -7910,8 +8320,10 @@ class FFABwdSm100:
                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)
             cute.arch.barrier(barrier_id=barrier_id + wg_idx, number_of_threads=128)
             cutedsl_utils.arrive_inc(mdKV_semaphore_cur.iterator, tidx, wg_idx, 1)
-        elif const_expr(self.is_persistent):
-            # Wait for TMA reads before the next tile reuses shared memory.
+        elif const_expr(self.is_persistent and not self.range_dkv_write_order):
+            # Wait for TMA reads before the next tile reuses shared memory. The
+            # dK/dV write order path drains reads after every stage and all writes
+            # before its arrive.
             if leader_warp:
                 cute.arch.cp_async_bulk_commit_group()
                 cute.arch.cp_async_bulk_wait_group(0, read=read_flag)

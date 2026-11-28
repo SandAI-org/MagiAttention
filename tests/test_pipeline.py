@@ -524,8 +524,9 @@ class TestPipelineBaseWithWorldSize1(DistTestBase):
                 return False
 
         if backend == MagiAttentionKernelBackend.CUTEDSL:
-            # CuteDSL backend: deterministic+ranges is NotImplementedError.
-            if deterministic:
+            head_dim = test_config.get("head_dim")
+            head_dim_v = test_config.get("head_dim_v", head_dim)
+            if deterministic and (head_dim != head_dim_v or head_dim not in (64, 128)):
                 return False
 
         if backend in (

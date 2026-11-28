@@ -44,7 +44,7 @@ from magi_attention.utils.version import is_cutedsl_version_ge
 
 from . import cutedsl_utils
 from . import pipeline as ffa_pipeline
-from . import sm100_utils
+from . import range_write_order, sm100_utils
 from .block_info import BlockInfo
 from .cutedsl_utils import ThreadCooperativeGroup
 from .dsl_compat import (
@@ -209,6 +209,14 @@ def fwd_fp32_o_borrows_kv_smem(
     return estimated_kv_stages >= q_stage * n_chunks + 1
 
 
+def fwd_o_reuses_q_smem(
+    *, head_dim_padded: int, head_dim_v_padded: int, is_split_kv: bool
+) -> bool:
+    return (head_dim_padded == 192 and head_dim_v_padded >= 64) or (
+        head_dim_v_padded >= 128 and is_split_kv
+    )
+
+
 class DescaleTensors(NamedTuple):
     q_descale: Optional[cute.Tensor] = None
     k_descale: Optional[cute.Tensor] = None
@@ -249,6 +257,7 @@ class FFAFwdSm100:
         disable_fwd_atomic_reduction: bool = False,
         # GMEM O dtype on the atomic path.
         o_dtype: Type[cutlass.Numeric] = Float32,
+        deterministic: bool = False,
         debug_print: bool = False,
     ):
         self.o_dtype = o_dtype
@@ -404,9 +413,11 @@ class FFAFwdSm100:
         # self.s0_s1_barrier = self.head_dim_padded in [64, 96] and (not self.maybe_causal and not self.is_local)
         self.s0_s1_barrier = False
 
-        self.overlap_sO_sQ = (
-            self.head_dim_padded == 192 and self.head_dim_v_padded >= 64
-        ) or (self.head_dim_v_padded >= 128 and self.is_split_kv)
+        self.overlap_sO_sQ = fwd_o_reuses_q_smem(
+            head_dim_padded=self.head_dim_padded,
+            head_dim_v_padded=self.head_dim_v_padded,
+            is_split_kv=self.is_split_kv,
+        )
         if self.overlap_sO_sQ:
             self.is_persistent = False
         assert not (self.sO_borrow_kv and self.overlap_sO_sQ)
@@ -452,6 +463,16 @@ class FFAFwdSm100:
             SchedulingMode.CLC,
             SchedulingMode.DYNAMIC,
         )
+        self.deterministic = deterministic
+        if deterministic:
+            assert (
+                self.scheduling_mode == SchedulingMode.DYNAMIC
+            ), "deterministic forward needs persistent range scheduling"
+            assert not disable_fwd_atomic_reduction and not is_split_kv
+            assert head_dim == head_dim_v and head_dim in (
+                64,
+                128,
+            ), "deterministic forward is defined at head_dim == head_dim_v in (64, 128)"
 
         if is_varlen_q:
             self.TileScheduler = SingleTileVarlenScheduler
@@ -762,7 +783,10 @@ class FFAFwdSm100:
         mRangeLocks: Optional[cute.Tensor] = None,
         max_seqlen_q: Int32 | None = None,
         mCuBatches: Optional[cute.Tensor] = None,  # [R + 1] CSR offsets for RangeMerge
-        sm_margin: Int32 | None = None,
+        mNumBatches: Optional[cute.Tensor] = None,  # [1] int32 active group count G
+        # CTA cap of the persistent range grid: the SM count of the launch
+        # device minus the SM reservation.
+        max_grid_ctas: Int32 | None = None,
         # [1] int32 tile counter for the DYNAMIC schedule, zero before the launch
         mTileCounter: Optional[cute.Tensor] = None,
         # [num_head_q] fp32, max softmax logit per q head, merged in with an
@@ -770,6 +794,8 @@ class FFAFwdSm100:
         mMaxLogits: Optional[cute.Tensor] = None,
         # tanh cap magnitude; required iff has_softcap.
         softcap: Float32 | None = None,
+        mWriteOrder: Optional[cute.Tensor] = None,
+        mLast: Optional[cute.Tensor] = None,
         blocksparse_tensors: Optional[BlockSparseTensors] = None,
         aux_tensors: Optional[list] = None,
         # Always keep stream as the last parameter (EnvStream: obtained implicitly via TVM FFI).
@@ -806,11 +832,25 @@ class FFAFwdSm100:
             "is_varlen_q compile flag disagrees with mQRanges argument"
         )
         assert (mRangeLocks is not None) == (
-            not self.disable_fwd_atomic_reduction
-        ), "range locks required iff fwd atomic reduction is enabled"
+            not self.disable_fwd_atomic_reduction and not self.deterministic
+        ), "range locks required iff fwd atomic reduction is enabled and not deterministic"
+        assert (
+            mWriteOrder is not None and mLast is not None
+        ) == self.deterministic, (
+            "write order and per-CTA last-writer state are required iff deterministic"
+        )
+        if const_expr(self.deterministic):
+            assert (
+                mWriteOrder is not None
+                and mLast is not None
+                and cute.rank(mWriteOrder) == 3
+            )
         assert (
             mCuBatches is not None
         ) == self.range_merge, "RangeMerge requires the cu_batches CSR (and only then)"
+        assert (
+            mNumBatches is None or mCuBatches is not None
+        ), "mNumBatches requires RangeMerge"
         if const_expr(not self.disable_fwd_atomic_reduction):
             assert mLSE is not None, "atomic reduction merges through LSE"
             assert mO.element_type == self.o_dtype
@@ -1248,6 +1288,7 @@ class FFAFwdSm100:
             else cute.size(mQ.shape[0]) * cute.size(mQ.shape[3]),
             tile_shape_mn=self.cta_tiler[:2],
             mQRanges=mQRanges,
+            mNumBatches=mNumBatches,
             # Overlapping Q ranges need per-range grid bounds without persistence.
             max_outer_range_width=(
                 max_seqlen_q
@@ -1264,7 +1305,7 @@ class FFAFwdSm100:
             else 1,
             element_size=self.k_dtype.width // 8,
             is_persistent=self.is_persistent,
-            sm_margin=sm_margin,
+            max_grid_ctas=max_grid_ctas,
             lpt=self.maybe_causal or self.is_local,
             is_split_kv=self.is_split_kv,
             cluster_shape_mn=self.cluster_shape_mn,
@@ -1276,6 +1317,7 @@ class FFAFwdSm100:
                 if const_expr(self.scheduling_mode == SchedulingMode.DYNAMIC)
                 else None
             ),
+            claim_first_tile=self.deterministic,
         )
         tile_sched_params = TileScheduler.to_underlying_arguments(
             tile_sched_args, scheduling_mode=self.scheduling_mode
@@ -1329,7 +1371,9 @@ class FFAFwdSm100:
             # PipelineClcFetchAsync expects 2 * sched_stages mbarriers (full + empty).
             clc_mbar_ptr: cute.struct.MemRange[cutlass.Int64, clc_mbar_size]
             # CLC response storage (16 bytes per stage, stored as 4 Int32s).
-            clc_response: cute.struct.MemRange[Int32, clc_response_size]
+            clc_response: cute.struct.Align[
+                cute.struct.MemRange[Int32, clc_response_size], 16
+            ]
             # Borrowed-KV-slot handoff between persistent tiles.
             borrow_mbar_ptr: cute.struct.MemRange[cutlass.Int64, borrow_mbar_size]
 
@@ -1508,6 +1552,15 @@ class FFAFwdSm100:
             descale_tensors,
             mMaskTypes,
             mRangeLocks,
+            (
+                range_write_order.WriteOrderTensors(
+                    mWriteOrder,
+                    mLast,
+                    Int32(1),
+                )
+                if const_expr(self.deterministic)
+                else None
+            ),
             mCuBatches,
             mMaxLogits,
             blocksparse_tensors,
@@ -1529,11 +1582,8 @@ class FFAFwdSm100:
         ).launch(
             grid=grid_dim,
             block=[self.threads_per_cta, 1, 1],
-            # DYNAMIC publishes tiles with st.async.shared::cluster, which needs
-            # a cluster launch even for one CTA.
             cluster=self.cluster_shape_mnk
             if cute.size(self.cluster_shape_mnk) > 1
-            or self.scheduling_mode == SchedulingMode.DYNAMIC
             else None,
             stream=stream,
             min_blocks_per_mp=1,
@@ -1565,6 +1615,7 @@ class FFAFwdSm100:
         descale_tensors: Optional[DescaleTensors],
         mMaskTypes: Optional[cute.Tensor],
         mRangeLocks: Optional[cute.Tensor],
+        fwd_write_order: Optional[range_write_order.WriteOrderTensors],
         mCuBatches: Optional[cute.Tensor],
         mMaxLogits: Optional[cute.Tensor],
         blocksparse_tensors: Optional[BlockSparseTensors],
@@ -2091,32 +2142,29 @@ class FFAFwdSm100:
             clc_response_ptr = storage.clc_response.data_ptr()
             clc_mbar_ptr = storage.clc_mbar_ptr.data_ptr()
 
-            clc_pipeline_producer_group = ThreadCooperativeGroup(1)
             num_clc_consumer_warps_per_cta = self.threads_per_cta // cute.arch.WARP_SIZE
             # NB on CTA0 warp15 == scheduler on CTA1 == empty but still both consume
             num_clc_consumer_warps = (
                 num_clc_consumer_warps_per_cta * self.cta_group_size
             )
-            clc_pipeline_consumer_group = ThreadCooperativeGroup(
-                cute.arch.WARP_SIZE * num_clc_consumer_warps
-            )
-            # CLC writes a 16-byte response; DYNAMIC publishes a 4-byte tile index.
-            sched_pipeline = pipeline.PipelineClcFetchAsync.create(
-                barrier_storage=clc_mbar_ptr,
-                num_stages=self.sched_stages,
-                producer_group=clc_pipeline_producer_group,
-                consumer_group=clc_pipeline_consumer_group,
-                tx_count=16 if const_expr(self.use_clc_scheduler) else 4,
-                cta_layout_vmnk=cta_layout_vmnk,
-            )
-            consumer_state = pipeline.make_pipeline_state(
-                pipeline.PipelineUserType.Consumer, self.sched_stages
-            )
-            producer_state = pipeline.make_pipeline_state(
-                pipeline.PipelineUserType.Producer, self.sched_stages
-            )
 
             if const_expr(self.use_clc_scheduler):
+                sched_pipeline = pipeline.PipelineClcFetchAsync.create(
+                    barrier_storage=clc_mbar_ptr,
+                    num_stages=self.sched_stages,
+                    producer_group=ThreadCooperativeGroup(1),
+                    consumer_group=ThreadCooperativeGroup(
+                        cute.arch.WARP_SIZE * num_clc_consumer_warps
+                    ),
+                    tx_count=16,
+                    cta_layout_vmnk=cta_layout_vmnk,
+                )
+                consumer_state = pipeline.make_pipeline_state(
+                    pipeline.PipelineUserType.Consumer, self.sched_stages
+                )
+                producer_state = pipeline.make_pipeline_state(
+                    pipeline.PipelineUserType.Producer, self.sched_stages
+                )
                 block_idx = cute.arch.block_idx()
                 clc = ClcState.create(
                     hw_scheduler=ClcDynamicPersistentTileScheduler.create(
@@ -2137,9 +2185,11 @@ class FFAFwdSm100:
                 tile_scheduler = SingleTileVarlenScheduler.create(
                     tile_sched_params,
                     dynamic=DynamicState.create(
-                        pipeline=sched_pipeline,
-                        consumer_state=consumer_state,
-                        producer_state=producer_state,
+                        barrier_storage=clc_mbar_ptr,
+                        num_stages=self.sched_stages,
+                        num_consumer_threads=cute.arch.WARP_SIZE
+                        * num_clc_consumer_warps,
+                        cta_layout_vmnk=cta_layout_vmnk,
                         response_ptr=clc_response_ptr,
                     ),
                 )
@@ -2185,7 +2235,7 @@ class FFAFwdSm100:
             if warp_idx == self.clc_scheduler_warp_id:
                 cute.arch.setmaxregister_decrease(self.num_regs_other)
                 if is_leader_cta:
-                    self.clc_scheduler_warp(tile_scheduler)
+                    self.scheduler_warp(tile_scheduler)
                 else:
                     self.empty_warp(tile_scheduler)
             for i in cutlass.range_constexpr(len(self.empty_warp_ids)):
@@ -2430,6 +2480,8 @@ class FFAFwdSm100:
                 mMaskTypes=mMaskTypes,
                 mCuBatches=mCuBatches,
                 mRangeLocks=mRangeLocks,
+                mQRanges=mQRanges,
+                fwd_write_order=fwd_write_order,
                 borrow_done_mbar_ptr=borrow_done_mbar_ptr,
                 is_print_block=is_print_block,
             )
@@ -4491,6 +4543,8 @@ class FFAFwdSm100:
         mMaskTypes: Optional[cute.Tensor] = None,
         mCuBatches: Optional[cute.Tensor] = None,
         mRangeLocks: Optional[cute.Tensor] = None,
+        mQRanges: Optional[cute.Tensor] = None,
+        fwd_write_order: Optional[range_write_order.WriteOrderTensors] = None,
         borrow_done_mbar_ptr: Optional[cute.Pointer] = None,
         is_print_block: bool = False,
     ):
@@ -4518,6 +4572,8 @@ class FFAFwdSm100:
         sm_stats_consumer_phase = Int32(0)
         o_corr_consumer_phase = Int32(0)
         corr_epi_producer_phase = Int32(1)
+        fwd_slot = cute.arch.block_idx()[0]
+        fwd_folded = Int32(0)
 
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
@@ -4529,6 +4585,25 @@ class FFAFwdSm100:
             m_block, head_idx, batch_idx, split_idx = work_tile.tile_idx
             kv_head_idx = self._kv_head_idx(head_idx)
             seqlen_info = SeqlenInfoCls(batch_idx)
+            if const_expr(self.deterministic):
+                assert mQRanges is not None and fwd_write_order is not None
+                if fwd_folded < batch_idx:
+                    range_write_order.fold_fwd_last(
+                        mQRanges,
+                        fwd_write_order.mLast,
+                        fwd_slot,
+                        fwd_folded,
+                        batch_idx,
+                        self.m_block_size,
+                        self.qhead_per_kvhead if const_expr(self.pack_gqa) else 1,
+                        tidx,
+                        cute.arch.WARP_SIZE * num_corr_warps,
+                    )
+                    cute.arch.barrier(
+                        barrier_id=int(NamedBarrierFwdSm100.Epilogue),
+                        number_of_threads=cute.arch.WARP_SIZE * num_corr_warps,
+                    )
+                    fwd_folded = batch_idx
             if const_expr(self.range_merge):
                 n_block_min = Int32(0)
                 n_block_max = self._fwd_merge_n_iters(
@@ -4923,7 +4998,6 @@ class FFAFwdSm100:
                     has_prev = False
                     lock_offset = Int32(0)
                     if const_expr(not self.disable_fwd_atomic_reduction):
-                        assert mRangeLocks is not None
                         m_tile_idx = (
                             m_block * self.q_stage + stage
                         ) * self.cta_group_size + mma_tile_coord_v
@@ -4957,8 +5031,40 @@ class FFAFwdSm100:
                         lock_offset = row_offset + m_tile_idx * self.m_block_size
                         # Skip lock/release for phantom stages (no valid rows).
                         tile_has_rows = num_rows > m_tile_idx * self.m_block_size
+                        if const_expr(self.deterministic):
+                            (
+                                left_block,
+                                right_block,
+                                left_weight,
+                                right_weight,
+                            ) = range_write_order.tile_arrivals(
+                                row_offset,
+                                row_offset + num_rows,
+                                m_tile_idx,
+                                self.m_block_size,
+                            )
                         if tile_has_rows:
-                            if tidx == 0:
+                            if const_expr(self.deterministic):
+                                assert fwd_write_order is not None
+                                if tidx == 0:
+                                    pred_left = range_write_order.last_writer(
+                                        fwd_write_order, fwd_slot, left_block
+                                    )
+                                    pred_right = pred_left
+                                    if right_block != left_block:
+                                        pred_right = range_write_order.last_writer(
+                                            fwd_write_order, fwd_slot, right_block
+                                        )
+                                    range_write_order.wait_blocks(
+                                        fwd_write_order,
+                                        left_block,
+                                        right_block,
+                                        head_idx,
+                                        pred_left,
+                                        pred_right,
+                                    )
+                            elif tidx == 0:
+                                assert mRangeLocks is not None
                                 self._acquire_range_locks(
                                     mRangeLocks, head_idx, lock_offset
                                 )
@@ -5035,9 +5141,25 @@ class FFAFwdSm100:
                                 * cute.arch.WARP_SIZE,
                             )
                             if tidx == 0:
-                                self._release_range_locks(
-                                    mRangeLocks, head_idx, lock_offset
-                                )
+                                if const_expr(self.deterministic):
+                                    assert fwd_write_order is not None
+                                    range_write_order.arrive_blocks(
+                                        fwd_write_order,
+                                        left_block,
+                                        right_block,
+                                        head_idx,
+                                        range_write_order.writer_number(
+                                            fwd_write_order, batch_idx
+                                        ),
+                                        left_weight,
+                                        right_weight,
+                                        1,
+                                    )
+                                else:
+                                    assert mRangeLocks is not None
+                                    self._release_range_locks(
+                                        mRangeLocks, head_idx, lock_offset
+                                    )
 
                     # Signal for the next work tile that tO are already read,
                     # so mma warp can write to them
@@ -5945,21 +6067,27 @@ class FFAFwdSm100:
             work_tile = tile_scheduler.advance_to_next_work()
 
     @cute.jit
-    def clc_scheduler_warp(
+    def scheduler_warp(
         self,
         tile_scheduler: TileSchedulerProtocol,
     ):
+        """Publish the tiles of the cluster: the DYNAMIC producer loop, or one
+        CLC query ahead of each tile."""
         # /////////////////////////////////////////////////////////////////////////////
         #  Persistent tile scheduler loop
         # /////////////////////////////////////////////////////////////////////////////
-        work_tile = tile_scheduler.initial_work_tile_info()
-        while work_tile.is_valid_tile:
-            tile_scheduler.prefetch_next_work()
+        if const_expr(not self.use_clc_scheduler):
+            assert isinstance(tile_scheduler, SingleTileVarlenScheduler)
+            tile_scheduler.run_dynamic_producer()
+        else:
+            work_tile = tile_scheduler.initial_work_tile_info()
+            while work_tile.is_valid_tile:
+                tile_scheduler.prefetch_next_work()
 
-            # Advance to next Q tile
-            work_tile = tile_scheduler.advance_to_next_work()
+                # Advance to next Q tile
+                work_tile = tile_scheduler.advance_to_next_work()
 
-        tile_scheduler.producer_tail()
+            tile_scheduler.producer_tail()
 
     @cute.jit
     def empty_warp(

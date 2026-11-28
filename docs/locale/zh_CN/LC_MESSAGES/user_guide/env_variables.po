@@ -737,8 +737,13 @@ msgstr "**使用方：** `magi_attention.env.comm.ffa_fwd_sm_margin_save_for_com
 #: ../../source/user_guide/env_variables.md:294
 msgid ""
 "Set the value of this env variable to control the number of SMs of the "
-"ffa forward kernel saved for comm kernels."
-msgstr "设置此环境变量的值以控制 ffa 前向内核为通信内核预留的 SM 数量。"
+"ffa forward kernel saved for comm kernels. Under the `cutedsl` kernel "
+"backend, the number of SMs minus this margin must hold one cluster of the"
+" launched kernel (two SMs for a 2-CTA kernel), otherwise the kernel "
+"raises `ValueError`."
+msgstr ""
+"设置此环境变量的值以控制 ffa 前向内核为通信内核预留的 SM 数量。在 `cutedsl` 内核后端下，SM "
+"总数减去此预留值必须至少容纳所启动内核的一个 cluster（2-CTA 内核为 2 个 SM），否则内核会抛出 `ValueError`。"
 
 #: ../../source/user_guide/env_variables.md:296
 msgid "**MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**"
@@ -751,8 +756,14 @@ msgstr "**使用方：** `magi_attention.env.comm.ffa_bwd_sm_margin_save_for_com
 #: ../../source/user_guide/env_variables.md:301
 msgid ""
 "Set the value of this env variable to control the number of SMs of the "
-"ffa backward kernel saved for comm kernels."
-msgstr "设置此环境变量的值以控制 ffa 反向内核为通信内核预留的 SM 数量。"
+"ffa backward kernel saved for comm kernels. Under the `cutedsl` kernel "
+"backend, the number of SMs minus this margin must hold one cluster of the"
+" launched kernel (two SMs for a 2-CTA kernel, such as the backward at "
+"`head_dim >= 128`), otherwise the kernel raises `ValueError`."
+msgstr ""
+"设置此环境变量的值以控制 ffa 反向内核为通信内核预留的 SM 数量。在 `cutedsl` 内核后端下，SM "
+"总数减去此预留值必须至少容纳所启动内核的一个 cluster（2-CTA 内核为 2 个 SM，例如 `head_dim >= 128` "
+"的反向内核），否则内核会抛出 `ValueError`。"
 
 #: ../../source/user_guide/env_variables.md:303
 msgid "**MAGI_ATTENTION_CPP_BACKEND**"
@@ -890,6 +901,18 @@ msgid ""
 "Toggle this env variable to `1` to enable deterministic mode to use "
 "deterministic algorithms for all magi_attention kernels."
 msgstr "将此环境变量设为 `1` 以启用确定性模式，对所有 magi_attention 内核使用确定性算法。"
+
+#: ../../source/user_guide/env_variables.md:387
+#, python-brace-format
+msgid ""
+"With the `cutedsl` kernel backend, deterministic q/k ranges require "
+"SM100/SM110 and `head_dim == head_dim_v` in {64, 128}; other "
+"configurations raise `NotImplementedError`. The kernels then launch "
+"persistent whatever `sm_margin`."
+msgstr ""
+"在 `cutedsl` 内核后端下，确定性 q/k ranges 需要 SM100/SM110 且 `head_dim == head_dim_v` "
+"属于 {64, 128}；其他配置会抛出 `NotImplementedError`。此时无论 `sm_margin` 取何值，内核均以 "
+"persistent 模式启动。"
 
 #: ../../source/user_guide/env_variables.md:374
 msgid "**MAGI_ATTENTION_PROFILE_MODE**"

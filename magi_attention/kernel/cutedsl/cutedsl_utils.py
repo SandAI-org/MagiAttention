@@ -994,6 +994,57 @@ def ld_acquire(lock_ptr: cute.Pointer, *, loc=None, ip=None) -> cutlass.Int32:
 
 
 @dsl_user_op
+def ld_acquire_cta(lock_ptr: cute.Pointer, *, loc=None, ip=None) -> cutlass.Int32:
+    lock_ptr_i64 = lock_ptr.toint(loc=loc, ip=ip).ir_value()
+    state = llvm.inline_asm(
+        T.i32(),
+        [lock_ptr_i64],
+        "ld.global.acquire.cta.b32 $0, [$1];",
+        "=r,l",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+    return cutlass.Int32(state)
+
+
+@dsl_user_op
+def st_global_release_gpu_i32(
+    ptr: cute.Pointer, val: Int32, *, loc=None, ip=None
+) -> None:
+    ptr_i64 = ptr.toint(loc=loc, ip=ip).ir_value()
+    llvm.inline_asm(
+        None,
+        [ptr_i64, Int32(val).ir_value(loc=loc, ip=ip)],
+        "st.release.gpu.global.s32 [$0], $1;",
+        "l,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def red_max_relaxed_cta(ptr: cute.Pointer, val: Int32, *, loc=None, ip=None) -> None:
+    ptr_i64 = ptr.toint(loc=loc, ip=ip).ir_value()
+    llvm.inline_asm(
+        None,
+        [ptr_i64, Int32(val).ir_value(loc=loc, ip=ip)],
+        "red.relaxed.cta.global.max.s32 [$0], $1;",
+        "l,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
 def red_relaxed(
     lock_ptr: cute.Pointer, val: cutlass.Constexpr[Int32], *, loc=None, ip=None
 ) -> None:
@@ -1860,3 +1911,90 @@ def gmem_store_cs_i32(
     """Store Int32 to GMEM with cache-streaming hint (st.cs)."""
     ptr = elem_pointer(tensor, coord, loc=loc, ip=ip)
     cute.arch.store(ptr.llvm_ptr, val, cop="cs", loc=loc, ip=ip)
+
+
+@dsl_user_op
+def mbarrier_arrive_peer_release_cluster(
+    mbar_ptr: cute.Pointer, peer_cta_rank_in_cluster: Int32, *, loc=None, ip=None
+) -> None:
+    """Cluster-scope peer arrive; cute.arch.mbarrier_arrive emits CTA-scope release only."""
+    llvm.inline_asm(
+        None,
+        [
+            mbar_ptr.toint(loc=loc, ip=ip).ir_value(),
+            Int32(peer_cta_rank_in_cluster).ir_value(loc=loc, ip=ip),
+        ],
+        "{\n\t.reg .b32 remote_mbar;\n\t"
+        "mapa.shared::cluster.u32 remote_mbar, $0, $1;\n\t"
+        "mbarrier.arrive.release.cluster.shared::cluster.b64 _, [remote_mbar];\n\t}",
+        "r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def mbarrier_wait_acquire_cluster(
+    mbar_ptr: cute.Pointer, phase: Int32, *, loc=None, ip=None
+) -> None:
+    """Cluster-scope parity wait; cute.arch.mbarrier_wait emits CTA-scope acquire only."""
+    llvm.inline_asm(
+        None,
+        [
+            mbar_ptr.toint(loc=loc, ip=ip).ir_value(),
+            Int32(phase).ir_value(loc=loc, ip=ip),
+        ],
+        "{\n\t.reg .pred phase_done;\n\t"
+        "wait_phase:\n\t"
+        "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 "
+        "phase_done, [$0], $1;\n\t"
+        "@!phase_done bra wait_phase;\n\t}",
+        "r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def store_shared_remote_v4(
+    v0: Int32,
+    v1: Int32,
+    v2: Int32,
+    v3: Int32,
+    smem_ptr: cute.Pointer,
+    mbar_ptr: cute.Pointer,
+    peer_cta_rank_in_cluster: Int32,
+    *,
+    loc=None,
+    ip=None,
+) -> None:
+    """Async store 16B (four int32s, 16B-aligned) to peer CTA smem and complete 16 tx bytes."""
+    llvm.inline_asm(
+        None,
+        [
+            smem_ptr.toint(loc=loc, ip=ip).ir_value(),
+            mbar_ptr.toint(loc=loc, ip=ip).ir_value(),
+            Int32(peer_cta_rank_in_cluster).ir_value(loc=loc, ip=ip),
+            Int32(v0).ir_value(loc=loc, ip=ip),
+            Int32(v1).ir_value(loc=loc, ip=ip),
+            Int32(v2).ir_value(loc=loc, ip=ip),
+            Int32(v3).ir_value(loc=loc, ip=ip),
+        ],
+        "{\n\t.reg .b32 remote_smem, remote_mbar;\n\t"
+        "mapa.shared::cluster.u32 remote_smem, $0, $2;\n\t"
+        "mapa.shared::cluster.u32 remote_mbar, $1, $2;\n\t"
+        "st.async.shared::cluster.mbarrier::complete_tx::bytes.v4.s32 "
+        "[remote_smem], {$3, $4, $5, $6}, [remote_mbar];\n\t}",
+        "r,r,r,r,r,r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )

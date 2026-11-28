@@ -189,8 +189,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> reorder_ranges_and_attn_
 
   const int threads = 256;
   const int blocks = (n_elements + threads - 1) / threads;
+  cudaStream_t stream = c10::cuda::getCurrentCUDAStream();
 
-  reorder_ranges_kernel<<<blocks, threads>>>(
+  reorder_ranges_kernel<<<blocks, threads, 0, stream>>>(
       reinterpret_cast<int2*>(outer_ranges.data_ptr<int>()),
       reinterpret_cast<int2*>(inner_ranges.data_ptr<int>()),
       attn_src_ptr,

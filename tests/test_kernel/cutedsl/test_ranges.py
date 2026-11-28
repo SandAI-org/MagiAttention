@@ -40,11 +40,13 @@ from magi_attention.testing.cutedsl_utils import (
     make_qkv,
     mask_types_arg,
     ranges_from_lengths,
+    record_fwd_kernels,
     seed_test_case,
     to_ranges_tensor,
     torch_reference_out_lse,
 )
 from magi_attention.testing.dist_common import with_run_in_mp
+from magi_attention.testing.precision import assert_equal
 
 DTYPE = torch.bfloat16
 
@@ -638,6 +640,62 @@ class TestPersistentSmMargin(CuteDSLDistTestBase):
             k_ranges=k_ranges,
             attn_type_map=attn_type_map,
             test_case=test_case,
+        )
+
+    @with_run_in_mp
+    @parameterize("heads", [MHA_HD64, MHA_HD128])
+    def test_sm_margin_grid_bound_past_int32_range_padding(self, heads: HeadConfig):
+        """The persistent grid bound holds a range count whose tile padding
+        exceeds Int32.
+
+        The bound pads every range by ``cluster rows - 1`` tokens. The range
+        count makes ``total_q`` plus that padding land in ``[2**31, 2**32)``,
+        where an Int32 sum is negative and the launch grid would be invalid.
+        Only the last range is non-empty, so a bound that drops trailing tiles
+        loses its rows.
+        """
+        test_case = (
+            f"[test_sm_margin_grid_bound_past_int32_range_padding][{heads.name}]"
+        )
+        seed_test_case(test_case)
+        rows = Q_RANGE_LEN
+        q, k, v = (
+            t.detach() for t in make_qkv((rows,), (rows,), heads, DTYPE, self.device)
+        )
+
+        def run(num_ranges: int) -> tuple[torch.Tensor, torch.Tensor]:
+            ranges = torch.full(
+                (num_ranges, 2), rows, dtype=torch.int32, device=self.device
+            )
+            ranges[-1, 0] = 0
+            return _flex_flash_attn_fwd(
+                q,
+                k,
+                v,
+                q_ranges=ranges,
+                k_ranges=ranges.clone(),
+                mask_types=MT_MAP.full,
+                max_seqlen_q=rows,
+                max_seqlen_k=rows,
+                sm_margin=SM_MARGIN,
+            )
+
+        with record_fwd_kernels() as built:
+            out_ref, lse_ref = run(1)
+            self.assertEqual(len(built), 1, f"{test_case} => one fwd kernel")
+            kernel = built[0]
+            self.assertTrue(kernel.is_persistent, f"{test_case} => persistent")
+            padding = kernel.cluster_shape_mn[0] * kernel.cta_tiler[0] - 1
+            num_ranges = (2**31 - rows) // padding + 1
+            self.assertLess(rows + num_ranges * padding, 2**32, test_case)
+            out, lse = run(num_ranges)
+            self.assertEqual(len(built), 1, f"{test_case} => shared kernel")
+
+        assert_equal(
+            out, out_ref, test_case=f"{test_case} => out", print_no_mismatch=False
+        )
+        assert_equal(
+            lse, lse_ref, test_case=f"{test_case} => lse", print_no_mismatch=False
         )
 
 

@@ -599,10 +599,19 @@ msgstr ""
 "`deterministic`、`fwd_hp_reduce`、`bwd_hp_reduce`、`qo_comm`、`sink`、`bwd_hide_tail_reduce`"
 
 #: ../../source/developer_guide/testing.md:225
+#, python-brace-format
+msgid ""
+"`cutedsl` backend allows `deterministic` only with `head_dim == head_dim_v` "
+"in {64, 128}"
+msgstr ""
+"`cutedsl` backend 仅在 `head_dim == head_dim_v` 属于 {64, 128} 时允许 "
+"`deterministic`"
+
+#: ../../source/developer_guide/testing.md:226
 msgid "`sdpa` / `sdpa_ol` backends disallow `native_grpcoll`"
 msgstr "`sdpa` / `sdpa_ol` backend 不允许 `native_grpcoll`"
 
-#: ../../source/developer_guide/testing.md:226
+#: ../../source/developer_guide/testing.md:227
 msgid "etc."
 msgstr "等等。"
 

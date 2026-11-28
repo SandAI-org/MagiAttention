@@ -487,11 +487,6 @@ def check_flag_comb() -> None:
             not env.comm.is_qo_comm_enable()
         ), "FA4 backend is not compatible with qo comm for now"
 
-    if env.general.kernel_backend() == MagiAttentionKernelBackend.CUTEDSL:
-        assert (  # kernel raises NotImplementedError for ranges + deterministic
-            not env.general.is_deterministic_mode_enable()
-        ), "CUTEDSL backend is not compatible with deterministic mode for now"
-
     bwd_pack_factor = env.general.bwd_pack_factor()
     if bwd_pack_factor > 1:
         # Only the CUTEDSL backward reads MAGI_ATTENTION_BWD_PACK_FACTOR; any

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 import math
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from unittest import mock
@@ -38,6 +38,7 @@ from magi_attention.testing.precision import (
     NORM_RTOL_RATIO,
     ROUNDING_NOISE_PERTURBATION,
     assert_close,
+    assert_equal,
     calc_inf_norm,
     calc_rounding_noise_norm,
     extract_mismatch_threshold,
@@ -46,6 +47,7 @@ from magi_attention.utils import make_attn_mask_from_ffa_args
 from magi_attention.utils.general import set_random_seed, str2seed
 
 Ranges = list[list[int]]
+Relations = list[tuple[list[int], list[int], int]]
 
 # Major arches whose kernels consume q/k ranges natively: overlapping q ranges
 # (atomic O merge), per-range mask types, RangeMerge, sink, non-input out dtype.
@@ -104,6 +106,17 @@ MQA_HD128 = HeadConfig("mqa_hd128", _NUM_HEADS_Q, 1, 128)
 def seed_test_case(test_case: str) -> None:
     """Seed every RNG from the test-case id, so a case reproduces on its own."""
     set_random_seed(str2seed(test_case))
+
+
+@contextmanager
+def sync_debug_error() -> Iterator[None]:
+    """Fail immediately on any implicit CPU-GPU synchronization inside the block."""
+    prev_mode = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        yield
+    finally:
+        torch.cuda.set_sync_debug_mode(prev_mode)
 
 
 @contextmanager
@@ -240,12 +253,53 @@ def _torch_reference(
         softcap=softcap,
         softmax_scale=softmax_scale,
         layout="thd",
-        # The sdpa reference supports neither sink nor softcap.
-        backend="sdpa" if sink is None and softcap == 0.0 else "torch",
+        # The sdpa reference handles neither sink/softcap nor all-masked Q rows.
+        backend=(
+            "sdpa"
+            if sink is None and softcap == 0.0 and bool(mask.any(dim=-1).all())
+            else "torch"
+        ),
         high_precision=high_precision,
     )
     grads = torch.autograd.grad(out, (q_ref, k_ref, v_ref), do.to(out.dtype))
     return AttnTensors(out, *grads)
+
+
+def assert_sequence_equal(
+    got: Sequence[torch.Tensor],
+    want: Sequence[torch.Tensor],
+    names: Sequence[str],
+    test_case: str = "",
+) -> None:
+    """Assert pairwise bitwise equality for named tensors."""
+    for g, w, name in zip(got, want, names, strict=True):
+        assert_equal(
+            g,
+            w,
+            test_case=f"{test_case} => {name}",
+            print_rank=-1,
+            print_no_mismatch=False,
+        )
+
+
+def assert_sequence_close(
+    got: Sequence[torch.Tensor],
+    want: Sequence[torch.Tensor],
+    names: Sequence[str],
+    tol: float,
+    test_case: str = "",
+) -> None:
+    """Assert pairwise fp32 closeness within ``tol`` for named tensors."""
+    for g, w, name in zip(got, want, names, strict=True):
+        assert_close(
+            g.float(),
+            w.float(),
+            atol=tol,
+            rtol=tol,
+            test_case=f"{test_case} => {name}",
+            print_rank=-1,
+            print_no_mismatch=False,
+        )
 
 
 def _check_one(
@@ -400,3 +454,73 @@ def dsink_reference(
 
 DSINK_ATOL = 2e-4
 DSINK_RTOL = 0.1
+
+
+def assert_cuda_graph_matches_eager(
+    fn: Callable[..., Sequence[torch.Tensor]],
+    capture_inputs: Sequence[torch.Tensor],
+    replay_inputs_list: Sequence[Sequence[torch.Tensor]],
+    *,
+    check: Callable[[int, Sequence[torch.Tensor], Sequence[torch.Tensor]], None]
+    | None = None,
+    test_case: str = "",
+) -> list[tuple[torch.Tensor, ...]]:
+    """Capture ``fn`` on a cloned static buffer set and verify every replay."""
+    static = [t.clone() for t in capture_inputs]
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        fn(*static)
+    torch.cuda.current_stream().wait_stream(side)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        static_out = fn(*static)
+
+    replayed: list[tuple[torch.Tensor, ...]] = []
+    for step, inputs in enumerate(replay_inputs_list):
+        for dst, src in zip(static, inputs, strict=True):
+            dst.copy_(src)
+        graph.replay()
+        torch.cuda.synchronize()
+        got = tuple(t.clone() for t in static_out)
+        eager = tuple(fn(*inputs))
+        torch.cuda.synchronize()
+        if check is not None:
+            check(step, got, eager)
+        else:
+            for idx, (g, w) in enumerate(zip(got, eager, strict=True)):
+                assert_equal(
+                    g,
+                    w,
+                    test_case=f"{test_case}[replay={step}][{idx}]"
+                    if test_case
+                    else f"tensor[{idx}]",
+                    print_rank=-1,
+                    print_no_mismatch=False,
+                )
+        replayed.append(got)
+    return replayed
+
+
+def overlapping_relations(
+    len_qs: Sequence[int], coverage: int, mask_types: Sequence[int]
+) -> tuple[Relations, int, int]:
+    """Per q length, ``coverage`` relations over shifted, unaligned q ranges,
+    each against its own K range; returns (relations, total_q, total_k)."""
+    relations: Relations = []
+    q_cursor, k_cursor, i = 0, 0, 0
+    for len_q in len_qs:
+        q_start = q_cursor + 3
+        for c in range(coverage):
+            len_k = len_q + 37
+            relations.append(
+                (
+                    [q_start + c, q_start + c + len_q],
+                    [k_cursor, k_cursor + len_k],
+                    mask_types[i % len(mask_types)],
+                )
+            )
+            k_cursor += len_k
+            i += 1
+        q_cursor = q_start + coverage + len_q
+    return relations, q_cursor + 5, k_cursor

@@ -48,11 +48,12 @@ from .ffa_bwd_sm120 import FFABwdSm120
 from .ffa_fwd_postprocess import fwd_postprocess
 from .ffa_fwd_sm80 import FFAFwdSm80
 from .ffa_fwd_sm90 import FFAFwdSm90
-from .ffa_fwd_sm100 import FFAFwdSm100, fwd_fp32_o_borrows_kv_smem
+from .ffa_fwd_sm100 import FFAFwdSm100, fwd_fp32_o_borrows_kv_smem, fwd_o_reuses_q_smem
 from .ffa_fwd_sm120 import FFAFwdSm120
 from .ffa_utils import (
     MT_MAP,
     TorchFlexAttnArgs,
+    alloc_write_order_tensors,
     convert_from_dlpack_leading_static,
     get_device_arch,
     hash_callable,
@@ -68,6 +69,8 @@ from .ffa_utils import (
     tile_size_fwd_sm90,
     validate_arch,
     validate_head_dims,
+    validate_persistent_grid,
+    validate_range_deterministic,
     validate_range_feature_support,
     validate_tensor,
     validate_true_ranges,
@@ -87,30 +90,39 @@ def _apply_range_merge(
     outer_ranges: torch.Tensor,
     inner_ranges: torch.Tensor,
     mask_types: int | torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> RangeMergePlan:
     """Rewrite one pass's relation rows to merged (group, pair) CSR form.
 
     Forward merges on the Q axis, backward on the K axis; the caller picks
-    which tensor is outer. Returns (outer, inner, mask_types, cu_batches)
-    with mask types materialized per row, since the merge reorders rows.
+    which tensor is outer.
     """
     if isinstance(range_merge, RangeMergePlan):
         plan = range_merge
         assert (
-            plan.merged_outer_ranges.shape[0] == outer_ranges.shape[0]
-        ), "RangeMergePlan row count disagrees with the outer ranges"
-        return (
-            plan.merged_outer_ranges,
-            plan.sorted_inner_ranges,
-            plan.sorted_mask_types,
-            plan.cu_batches,
-        )
-    outer, inner, merged_mask_types, cu_batches = merge_qk_ranges(
+            plan.sorted_inner_ranges.shape[0]
+            == plan.sorted_mask_types.shape[0]
+            == outer_ranges.shape[0]
+        ), "RangeMergePlan relation count disagrees with the ranges"
+        assert (
+            plan.cu_batches.shape[0] == plan.merged_outer_ranges.shape[0] + 1
+        ), "RangeMergePlan cu_batches must have one entry per group plus one"
+        assert (
+            plan.merged_outer_ranges_by_start.shape == plan.merged_outer_ranges.shape
+        ), "RangeMergePlan start-ordered groups disagree with the groups"
+        if plan.unique_count is not None:
+            validate_tensor(
+                plan.unique_count,
+                "RangeMergePlan.unique_count",
+                (1,),
+                torch.int32,
+                outer_ranges.device,
+            )
+        return plan
+    return merge_qk_ranges(
         outer_ranges,
         inner_ranges,
         materialize_mask_types(mask_types, outer_ranges.shape[0], outer_ranges.device),
     )
-    return outer, inner, merged_mask_types, cu_batches
 
 
 def _split_mask_types(
@@ -151,6 +163,7 @@ def _flex_flash_attn_fwd(
     sm_margin: int = 0,
     max_logits: torch.Tensor | None = None,
     fill_uncovered_rows: bool = False,
+    deterministic: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Forward pass for FlexFlashAttention.
 
@@ -183,8 +196,9 @@ def _flex_flash_attn_fwd(
         sink: optional ``[n_sink, num_head]`` sink logits (``"sh"`` layout only).
         pack_gqa: fold the q heads of one kv head into the M dimension, so one
             CTA serves ``(token, q_head)`` rows of a kv head. ``None`` enables
-            it for GQA except on the range atomic-merge path, where it is
-            opt-in and requires ``tile_m % (num_head // num_head_kv) == 0``.
+            it for GQA on the direct-store paths when
+            ``tile_m % (num_head // num_head_kv) == 0``; on the range
+            atomic-merge path it is opt-in and requires that multiple.
             SM80 and ``range_merge`` always run unpacked, including with
             ``pack_gqa=True``.
         out_dtype: GMEM O dtype, one of fp32/fp16/bf16. ``None`` takes the dtype
@@ -254,11 +268,15 @@ def _flex_flash_attn_fwd(
     )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
+    num_groups = None
     if range_merge_active:
         assert q_ranges is not None and k_ranges is not None  # has_ranges
-        q_ranges, k_ranges, mask_types, cu_batches = _apply_range_merge(
-            range_merge, q_ranges, k_ranges, mask_types
-        )
+        q_merge = _apply_range_merge(range_merge, q_ranges, k_ranges, mask_types)
+        q_ranges = q_merge.merged_outer_ranges
+        k_ranges = q_merge.sorted_inner_ranges
+        mask_types = q_merge.sorted_mask_types
+        cu_batches = q_merge.cu_batches
+        num_groups = q_merge.unique_count
         pack_gqa = False
     per_range, mask_type, mask_types_tensor = _split_mask_types(mask_types)
     # SM100/SM110 kernels consume mQRanges/mKRanges directly. Other arches
@@ -322,10 +340,16 @@ def _flex_flash_attn_fwd(
 
     # The atomic merge is a ranges-overlap path; a no-op for dense, and
     # unsupported outside SM100/SM110 — fall back to the direct store there.
+    if (
+        deterministic
+        and has_ranges
+        and not disable_fwd_atomic_reduction
+        and major_arch not in (10, 11)
+    ):
+        raise NotImplementedError("deterministic q/k ranges require SM100/SM110")
     if not has_ranges or major_arch not in (10, 11):
         disable_fwd_atomic_reduction = True
-    if pack_gqa is None:
-        pack_gqa = qhead_per_kvhead > 1 and disable_fwd_atomic_reduction
+    fwd_deterministic = deterministic and not disable_fwd_atomic_reduction
 
     # The SM80 fwd kernel indexes mQ by query head directly; the packed-GQA
     # epilogue path is unsupported, so force unpacked store.
@@ -463,6 +487,15 @@ def _flex_flash_attn_fwd(
             mma_pv_is_rs = fwd_cfg.mma_pv_is_rs
             intra_wg_overlap = fwd_cfg.intra_wg_overlap
 
+    if pack_gqa is None:
+        # Pack direct-store GQA only when every q tile starts on a token
+        # boundary; unaligned tiles lose TMA Q loads and O stores.
+        pack_gqa = (
+            qhead_per_kvhead > 1
+            and disable_fwd_atomic_reduction
+            and tile_m % qhead_per_kvhead == 0
+        )
+
     if max_seqlen_q is None:
         max_seqlen_q = seqlen_q if not has_ranges else total_q
     if has_ranges and magiattn_cutedsl.is_ffa_debug_mode_enabled():
@@ -474,6 +507,22 @@ def _flex_flash_attn_fwd(
         assert (
             max_seqlen_q >= _q_max
         ), f"max_seqlen_q={max_seqlen_q} < longest q range {_q_max}"
+    # SM count of the launch device. The persistent grid cap and the per-CTA
+    # last-writer rows both derive from this one query.
+    num_sm = torch.cuda.get_device_properties(device).multi_processor_count
+    if fwd_deterministic:
+        tile_heads = num_head_kv if pack_gqa else num_head
+        tile_rows = max_seqlen_q * (qhead_per_kvhead if pack_gqa else 1)
+        validate_range_deterministic(
+            major_arch=major_arch,
+            has_block_sparse=use_block_sparsity,
+            head_dim=head_dim,
+            head_dim_v=head_dim_v,
+            num_sm=num_sm,
+            cluster_size=1,
+            max_tickets=batch_size * tile_heads * ((tile_rows + tile_m - 1) // tile_m),
+            max_writer=batch_size,
+        )
     if max_seqlen_k is None:
         max_seqlen_k = seqlen_k
     if pack_gqa and not disable_fwd_atomic_reduction and tile_m % qhead_per_kvhead != 0:
@@ -546,7 +595,22 @@ def _flex_flash_attn_fwd(
     is_dense_noncausal = not has_ranges and not causal and not local
 
     # K/V borrowing uses persistent execution even without an SM reservation.
-    ranges_persistent = has_ranges and (sm_margin > 0 or fwd_fp32_o_borrow_kv)
+    ranges_persistent = has_ranges and (
+        sm_margin > 0 or fwd_fp32_o_borrow_kv or fwd_deterministic
+    )
+    if ranges_persistent and not fwd_o_reuses_q_smem(
+        head_dim_padded=int(math.ceil(head_dim / 16) * 16),
+        head_dim_v_padded=int(math.ceil(head_dim_v / 16) * 16),
+        is_split_kv=False,
+    ):
+        validate_persistent_grid(
+            num_sm=num_sm,
+            sm_margin=sm_margin,
+            cluster_size=2 if use_2cta_instrs else 1,
+        )
+    # CTA cap of the persistent grid; the kernel indexes the per-CTA
+    # last-writer rows with the grid x index, so they hold this many rows.
+    max_grid_ctas = num_sm - sm_margin if ranges_persistent else None
     use_clc_scheduler = (
         requested_use_clc_scheduler
         and not is_varlen_mha
@@ -581,18 +645,20 @@ def _flex_flash_attn_fwd(
     else:
         aux_tensor_metadata = None
 
-    range_locks = None
+    range_locks = write_order = write_last = None
     if not disable_fwd_atomic_reduction:
-        # One int32 lock per (tile_m rows, head) of the layout the kernel
-        # tiles (packed rows and kv heads under pack_gqa); +1 guard tile.
         lock_rows = total_q * (qhead_per_kvhead if pack_gqa else 1)
-        num_lock_blocks = (lock_rows + tile_m - 1) // tile_m + 1
-        range_locks = torch.zeros(
-            num_lock_blocks,
-            num_head_kv if pack_gqa else num_head,
-            dtype=torch.int32,
-            device=device,
-        )
+        lock_heads = num_head_kv if pack_gqa else num_head
+        if fwd_deterministic:
+            assert q_ranges is not None and max_grid_ctas is not None
+            write_order, write_last = alloc_write_order_tensors(
+                lock_rows, tile_m, lock_heads, max_grid_ctas, device
+            )
+        else:
+            num_lock_blocks = (lock_rows + tile_m - 1) // tile_m + 1
+            range_locks = torch.zeros(
+                num_lock_blocks, lock_heads, dtype=torch.int32, device=device
+            )
     # The DYNAMIC schedule's tile counter.
     tile_counter = (
         torch.zeros(1, dtype=torch.int32, device=device) if ranges_persistent else None
@@ -629,7 +695,9 @@ def _flex_flash_attn_fwd(
         use_clc_scheduler,
         persistent_launch,
         range_merge_active,
+        num_groups is not None,
         max_logits is not None,
+        fwd_deterministic,
         magiattn_cutedsl.is_ffa_debug_mode_enabled(),
     )
 
@@ -746,6 +814,7 @@ def _flex_flash_attn_fwd(
                     range_merge=range_merge_active,
                     disable_fwd_atomic_reduction=disable_fwd_atomic_reduction,
                     o_dtype=to_cute_dtype(out_torch_dtype),
+                    deterministic=fwd_deterministic,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
             case 12:
@@ -804,7 +873,14 @@ def _flex_flash_attn_fwd(
                 if cu_batches is not None
                 else None
             )
-            compile_args.append(Int32(sm_margin) if ranges_persistent else None)
+            compile_args.append(
+                to_cute_tensor(num_groups, assumed_align=4, leading_dim=0)
+                if num_groups is not None
+                else None
+            )
+            compile_args.append(
+                Int32(max_grid_ctas) if max_grid_ctas is not None else None
+            )
             compile_args.append(
                 to_cute_tensor(tile_counter, assumed_align=4, leading_dim=0)
                 if tile_counter is not None
@@ -816,6 +892,16 @@ def _flex_flash_attn_fwd(
                 else None
             )
             compile_args.append(Float32(softcap) if softcap is not None else None)
+            compile_args.append(
+                to_cute_tensor(write_order, assumed_align=4)
+                if write_order is not None
+                else None
+            )
+            compile_args.append(
+                to_cute_tensor(write_last, assumed_align=4)
+                if write_last is not None
+                else None
+            )
         compile_args.extend(
             [
                 sparse_tensors,
@@ -852,10 +938,13 @@ def _flex_flash_attn_fwd(
         call_args.append(range_locks)
         call_args.append(max_seqlen_q)
         call_args.append(cu_batches)
-        call_args.append(sm_margin if ranges_persistent else None)
+        call_args.append(num_groups)
+        call_args.append(max_grid_ctas)
         call_args.append(tile_counter)
         call_args.append(max_logits)
         call_args.append(softcap)
+        call_args.append(write_order)
+        call_args.append(write_last)
     call_args.extend(
         [
             block_sparse_call_tuple(normalized_block_sparse_tensors),
@@ -985,17 +1074,33 @@ def _flex_flash_attn_bwd(
         has_block_sparse=block_sparse_tensors is not None,
         has_user_score_mod=flex_attn_args.score_mod is not None
         or flex_attn_args.score_mod_bwd is not None,
-        deterministic=deterministic,
         bwd_head_dim=q.shape[-1],
         sm_margin=sm_margin,
     )
+    if (
+        has_ranges
+        and max_seqlen_k is not None
+        and magiattn_cutedsl.is_ffa_debug_mode_enabled()
+        and k_ranges is not None
+        and k_ranges.shape[0] > 0
+    ):
+        longest_k = int((k_ranges[:, 1] - k_ranges[:, 0]).max().item())
+        if longest_k > max_seqlen_k:
+            raise ValueError(
+                f"max_seqlen_k={max_seqlen_k} < longest k range {longest_k}"
+            )
     range_merge_active = bool(range_merge) and has_ranges
     cu_batches = None
+    num_groups = None
+    k_merge = None
     if range_merge_active:
         assert q_ranges is not None and k_ranges is not None  # has_ranges
-        k_ranges, q_ranges, mask_types, cu_batches = _apply_range_merge(
-            range_merge, k_ranges, q_ranges, mask_types
-        )
+        k_merge = _apply_range_merge(range_merge, k_ranges, q_ranges, mask_types)
+        k_ranges = k_merge.merged_outer_ranges
+        q_ranges = k_merge.sorted_inner_ranges
+        mask_types = k_merge.sorted_mask_types
+        cu_batches = k_merge.cu_batches
+        num_groups = k_merge.unique_count
     if has_ranges and major_arch not in (10, 11):
         cu_seqlens_q = ranges_to_cu_seqlens(q_ranges)
         cu_seqlens_k = ranges_to_cu_seqlens(k_ranges)
@@ -1227,6 +1332,56 @@ def _flex_flash_attn_bwd(
             "disable_bwd_dkv_atomic_reduction requires a unique dK/dV writer "
             "per KV head: MHA, or GQA with cat_gqa or bwd_pack_factor > 1"
         )
+    direct_dkv = (
+        disable_bwd_dkv_atomic_reduction and has_ranges and major_arch in (10, 11)
+    )
+    direct_dq_init = (
+        disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
+    )
+    # Without the in-kernel K-merge the kernels see the caller's sorted, disjoint
+    # q_ranges; the K-merge repeats a q range once per K group.
+    q_ranges_disjoint = direct_dq_init and not range_merge_active
+    # Packed tiles reduce dQ through the token-space row-major dQacc, whose
+    # TMA box splits rows into (pack_factor, tokens).
+    use_dense_dqacc_for_ranges = (
+        q_ranges_disjoint and head_dim % 32 == 0 and gqa_fold.pack_factor == 1
+    )
+
+    range_deterministic = deterministic and has_ranges
+    # SM count of the launch device. The persistent grid cap and the per-CTA
+    # last-writer rows both derive from this one query.
+    num_sm = torch.cuda.get_device_properties(q.device).multi_processor_count
+    dq_writer_stride: int | None = None
+    if range_deterministic:
+        dkv_writer_stride = gqa_fold.dkv_writer_stride
+        cluster_tile_k = n_block_size * cluster_size
+        max_k_tiles = (seqlen_k + cluster_tile_k - 1) // cluster_tile_k
+        if not use_dense_dqacc_for_ranges:
+            dq_writer_stride = max_k_tiles
+        dq_max_writer = 0 if use_dense_dqacc_for_ranges else batch_size * max_k_tiles
+        dkv_max_writer = 0 if direct_dkv else batch_size * dkv_writer_stride
+        validate_range_deterministic(
+            major_arch=major_arch,
+            has_block_sparse=block_sparse_tensors is not None,
+            head_dim=head_dim,
+            head_dim_v=head_dim_v,
+            num_sm=num_sm,
+            cluster_size=cluster_size,
+            max_tickets=batch_size
+            * max_k_tiles
+            * (num_head_kv if cat_gqa else num_head),
+            max_writer=max(dq_max_writer, dkv_max_writer),
+        )
+    bwd_persistent = sm_margin > 0 or range_deterministic
+    if bwd_persistent:
+        validate_persistent_grid(
+            num_sm=num_sm,
+            sm_margin=sm_margin,
+            cluster_size=cluster_size,
+        )
+    # CTA cap of the persistent grid; the kernel indexes the per-CTA
+    # last-writer rows with the grid x index, so they hold this many rows.
+    max_grid_ctas = num_sm - sm_margin if bwd_persistent else None
 
     if score_mod is not None:
         assert (
@@ -1242,13 +1397,6 @@ def _flex_flash_attn_bwd(
 
     k_ranges_sorted_disjoint = has_ranges and (
         declared_k_full_coverage or disable_bwd_dkv_atomic_reduction
-    )
-
-    direct_dkv = (
-        disable_bwd_dkv_atomic_reduction and has_ranges and major_arch in (10, 11)
-    )
-    direct_dq_init = (
-        disable_fwd_atomic_reduction and has_ranges and major_arch in (10, 11)
     )
 
     # Ranges force accum+postprocess even for MHA: overlapping K ranges
@@ -1275,14 +1423,6 @@ def _flex_flash_attn_bwd(
             "dq_type/dk_type/dv_type other than the input dtype require SM100/SM110"
         )
 
-    # Without the in-kernel K-merge the kernels see the caller's sorted, disjoint
-    # q_ranges; the K-merge repeats a q range once per K group.
-    q_ranges_disjoint = direct_dq_init and not range_merge_active
-    # Packed tiles reduce dQ through the token-space row-major dQacc, whose
-    # TMA box splits rows into (pack_factor, tokens).
-    use_dense_dqacc_for_ranges = (
-        q_ranges_disjoint and head_dim % 32 == 0 and gqa_fold.pack_factor == 1
-    )
     if q_ranges_disjoint and magiattn_cutedsl.is_ffa_debug_mode_enabled():
         assert q_ranges is not None
         assert bool((q_ranges[1:, 0] >= q_ranges[:-1, 1]).all().item()), (
@@ -1338,10 +1478,14 @@ def _flex_flash_attn_bwd(
         return dq, dk, dv, dsink
 
     if direct_dkv and not declared_k_full_coverage:
+        # Hole cleanup binary-searches sorted starts; merged K groups are launch-ordered.
+        hole_k_ranges = (
+            k_ranges if k_merge is None else k_merge.merged_outer_ranges_by_start
+        )
         if dk_self_alloc:
-            bwd_grad_zero_holes(dk, k_ranges)
+            bwd_grad_zero_holes(dk, hole_k_ranges)
         if dv_self_alloc:
-            bwd_grad_zero_holes(dv, k_ranges)
+            bwd_grad_zero_holes(dv, hole_k_ranges)
 
     rowmajor_accum = has_ranges and major_arch in (10, 11)
     # Row-major postprocess sweeps in-range rows; with accumulate it sweeps every
@@ -1464,7 +1608,8 @@ def _flex_flash_attn_bwd(
     dtype = to_cute_dtype(q.dtype)
     current_stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
 
-    if deterministic:
+    dense_deterministic = deterministic and not has_ranges
+    if dense_deterministic:
         dQ_semaphore = torch.zeros(
             batch_size,
             num_head,
@@ -1473,15 +1618,43 @@ def _flex_flash_attn_bwd(
             dtype=torch.int32,
             device=device,
         )
+    elif range_deterministic and use_dense_dqacc_for_ranges:
+        dQ_semaphore = torch.zeros(
+            1,
+            num_head,
+            total_q_rounded_padded // m_block_size,
+            cluster_size,
+            dtype=torch.int32,
+            device=device,
+        )
     else:
         dQ_semaphore = None
+    dq_write_order = dq_last = None
+    if range_deterministic and not use_dense_dqacc_for_ranges:
+        assert (
+            q_ranges is not None
+            and k_ranges is not None
+            and dq_writer_stride is not None
+            and max_grid_ctas is not None
+        )
+        dq_write_order, dq_last = alloc_write_order_tensors(
+            total_q, m_block_size, num_head, max_grid_ctas, device
+        )
+    dkv_write_order = dkv_last = None
+    if range_deterministic and not direct_dkv:
+        assert (
+            q_ranges is not None and k_ranges is not None and max_grid_ctas is not None
+        )
+        dkv_write_order, dkv_last = alloc_write_order_tensors(
+            total_k, cluster_tile_k, num_head_kv, max_grid_ctas, device
+        )
 
     # The DYNAMIC schedule's tile counter.
     tile_counter = (
-        torch.zeros(1, dtype=torch.int32, device=device) if sm_margin > 0 else None
+        torch.zeros(1, dtype=torch.int32, device=device) if bwd_persistent else None
     )
 
-    if deterministic and not gqa_fold.covers_all_qheads:
+    if dense_deterministic and not gqa_fold.covers_all_qheads:
         dK_semaphore = torch.zeros(
             batch_size,
             num_head_kv,
@@ -1632,9 +1805,10 @@ def _flex_flash_attn_bwd(
             disable_bwd_dkv_atomic_reduction,
             dk_dtype,
             range_merge_active,
+            num_groups is not None,
             use_dense_dqacc_for_ranges,
             k_ranges_sorted_disjoint,
-            sm_margin > 0,
+            bwd_persistent,
             get_broadcast_dims(q),
             get_broadcast_dims(k),
             get_broadcast_dims(v),
@@ -1755,7 +1929,7 @@ def _flex_flash_attn_bwd(
                     range_merge=range_merge_active,
                     use_dense_dqacc_for_ranges=use_dense_dqacc_for_ranges,
                     k_ranges_sorted_disjoint=k_ranges_sorted_disjoint,
-                    is_persistent=sm_margin > 0,
+                    is_persistent=bwd_persistent,
                     debug_print=magiattn_cutedsl.is_ffa_debug_mode_enabled(),
                 )
 
@@ -1800,15 +1974,37 @@ def _flex_flash_attn_bwd(
                 if cu_batches is not None
                 else None
             )
+            bwd_compile_args.append(
+                to_cute_tensor(num_groups, assumed_align=4, leading_dim=0)
+                if num_groups is not None
+                else None
+            )
             # Runtime scalar: the compiled variant stays max_seqlen_k-agnostic.
             bwd_compile_args.append(Int32(seqlen_k))
-            bwd_compile_args.append(Int32(sm_margin) if sm_margin > 0 else None)
+            bwd_compile_args.append(
+                Int32(max_grid_ctas) if max_grid_ctas is not None else None
+            )
             bwd_compile_args.append(
                 to_cute_tensor(tile_counter, assumed_align=4, leading_dim=0)
                 if tile_counter is not None
                 else None
             )
             bwd_compile_args.append(Float32(softcap_value) if has_softcap else None)
+            bwd_compile_args.extend(
+                [
+                    (to_cute_tensor(t, assumed_align=4) if t is not None else None)
+                    for t in (dq_write_order, dq_last)
+                ]
+            )
+            bwd_compile_args.append(
+                Int32(dq_writer_stride) if dq_writer_stride is not None else None
+            )
+            bwd_compile_args.extend(
+                [
+                    (to_cute_tensor(t, assumed_align=4) if t is not None else None)
+                    for t in (dkv_write_order, dkv_last)
+                ]
+            )
         bwd_compile_args.extend(
             [
                 cute_aux_tensors,
@@ -1844,10 +2040,16 @@ def _flex_flash_attn_bwd(
     if major_arch in [10, 11]:
         bwd_call_args.append(mask_types_tensor)
         bwd_call_args.append(cu_batches)
+        bwd_call_args.append(num_groups)
         bwd_call_args.append(seqlen_k)
-        bwd_call_args.append(sm_margin if sm_margin > 0 else None)
+        bwd_call_args.append(max_grid_ctas)
         bwd_call_args.append(tile_counter)
         bwd_call_args.append(softcap_value)
+        bwd_call_args.append(dq_write_order)
+        bwd_call_args.append(dq_last)
+        bwd_call_args.append(dq_writer_stride)
+        bwd_call_args.append(dkv_write_order)
+        bwd_call_args.append(dkv_last)
     bwd_call_args.extend(
         [
             aux_tensors,
@@ -2031,6 +2233,7 @@ class FlexFlashAttnFunc(torch.autograd.Function):
             out_dtype=out_dtype,
             sm_margin=sm_margin,
             max_logits=max_logits,
+            deterministic=deterministic,
         )
         # The atomic path defaults O to fp32; hand the caller the input dtype
         # unless they asked for a specific one.
@@ -2199,12 +2402,14 @@ def flex_flash_attn_func(
         An enabled cap cannot be combined with a user ``score_mod``.
 
     pack_gqa: fold the q heads of one kv head into the M dimension of the
-        forward. ``None`` packs GQA except on the SM100/SM110 range
-        atomic-merge path, where packing is opt-in and needs the q-tile size
-        (128) to be a multiple of ``nheads_q // nheads_kv``. SM80 and
-        ``range_merge`` always run unpacked, including with ``pack_gqa=True``.
-        The backward does not read it; ``bwd_pack_factor`` sets the backward
-        packing.
+        forward. ``None`` packs GQA on the direct-store paths when the q-tile
+        size (128) is a multiple of ``nheads_q // nheads_kv``; a tile that
+        starts inside a token loses the TMA Q load and O store and runs slower
+        than unpacked, so ``None`` leaves such groups unpacked and ``True``
+        still packs them. The SM100/SM110 range atomic-merge path packs only
+        on request and requires that multiple. SM80 and ``range_merge`` always
+        run unpacked, including with ``pack_gqa=True``. The backward does not
+        read it; ``bwd_pack_factor`` sets the backward packing.
 
     disable_fwd_atomic_reduction: caller contract that q_ranges are sorted
         and pairwise disjoint, giving every O and dQ row a unique writer.
@@ -2228,7 +2433,9 @@ def flex_flash_attn_func(
         relations sharing an outer interval into (group, pair) CSR form so
         forward skips the atomic O merge; backward derives the dual K-merge.
         SM100/SM110 only; requires both ``disable_*_atomic_reduction``
-        contracts.
+        contracts. ``True`` builds the merge tables on device in every call
+        without host synchronization (CUDA-graph capturable); pass a plan
+        from :func:`plan_range_merge` to reuse the tables across calls.
 
     out_dtype: dtype of the returned O, fp32/fp16/bf16. None returns the input
         dtype. A dtype other than the input dtype requires SM100/SM110. With
@@ -2268,6 +2475,9 @@ def flex_flash_attn_func(
         ``ValueError`` for an invalid value and ``NotImplementedError`` for an
         unsupported combination. Gradients differ from the unpacked backward
         only in the fp32 summation order. The forward is unaffected.
+
+    deterministic: bitwise-reproducible outputs and gradients (ranges need
+        SM100/SM110, head_dim == head_dim_v in {64, 128}).
 
     flex_attn_args: optional :class:`TorchFlexAttnArgs` bundling the
         FlexAttention-style programmable (``score_mod`` / ``score_mod_bwd`` /

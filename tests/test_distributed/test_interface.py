@@ -55,7 +55,8 @@ from magi_attention.dist_attn_runtime_mgr import (
     DistAttnRuntimeMgr,
     init_dist_attn_runtime_mgr,
 )
-from magi_attention.testing import parameterize
+from magi_attention.testing import parameterize, ref_attn_func
+from magi_attention.testing.cutedsl_utils import record_bwd_kernels
 from magi_attention.testing.dist_common import (
     INTERFACE,
     NAME,
@@ -64,12 +65,14 @@ from magi_attention.testing.dist_common import (
     with_comms,
 )
 from magi_attention.testing.precision import (
+    EPSILON,
     H100_MATMUL_MFU,
     H100_NVLINK_A2A_BWU,
     H100_NVLINK_BANDWIDTH,
     H100_TFLOPS_16,
+    assert_close,
 )
-from magi_attention.testing.utils import switch_deterministic_mode_decorator
+from magi_attention.testing.utils import switch_deterministic_mode_decorator, switch_env
 from magi_attention.utils import (
     get_a2a_corr_factor,
     get_calc_cost_factor,
@@ -771,6 +774,129 @@ class TestInterfaceWithWorldSize4(TestInterfaceBaseWithWorldSize1):
     @skip_if_lt_x_gpu(4)
     def test_interface(self, *args, **kwargs):
         super().test_interface(*args, **kwargs)
+
+    @skip_if_lt_x_gpu(4)
+    @with_comms
+    def test_cutedsl_deterministic_mode_bitwise_through_public_api(self):
+        if torch.cuda.get_device_capability()[0] not in (10, 11):
+            self.skipTest("deterministic q/k ranges require SM100/SM110")
+        total_seqlen, nhq, nhk, head_dim = 1024, 8, 4, 128
+        dtype = torch.bfloat16
+        total_q, total_k, total_v = (
+            torch.randn(total_seqlen, nh, head_dim, device=self.device, dtype=dtype)
+            for nh in (nhq, nhk, nhk)
+        )
+        grad_total_out = torch.randn_like(total_q)
+        for t in (total_q, total_k, total_v, grad_total_out):
+            dist.broadcast(t, src=0, group=self.nccl_group)
+
+        with switch_env(
+            {
+                "MAGI_ATTENTION_KERNEL_BACKEND": MagiAttentionKernelBackend.CUTEDSL,
+                "MAGI_ATTENTION_DETERMINISTIC_MODE": True,
+            }
+        ):
+            key = magi_attn_flex_key(
+                q_ranges=AttnRanges.from_ranges([[0, 512], [512, 1024], [512, 1024]]),
+                k_ranges=AttnRanges.from_ranges([[0, 512], [0, 512], [512, 1024]]),
+                attn_mask_type=[
+                    AttnMaskType.CAUSAL,
+                    AttnMaskType.FULL,
+                    AttnMaskType.CAUSAL,
+                ],
+                total_seqlen_q=total_seqlen,
+                total_seqlen_k=total_seqlen,
+                num_heads_q=nhq,
+                num_heads_kv=nhk,
+                head_dim=head_dim,
+                pad_size=0,
+                cp_group_or_mesh=self.nccl_group,
+                dist_attn_config=DistAttnConfig(
+                    dispatch_config=DispatchConfig(chunk_size=128)
+                ),
+            )
+            local_q, local_k, local_v = (
+                dispatch(t, key=key) for t in (total_q, total_k, total_v)
+            )
+
+            def run():
+                leaves = [
+                    t.detach().clone().requires_grad_()
+                    for t in (local_q, local_k, local_v)
+                ]
+                local_out, meta = calc_attn(*leaves, key=key)
+                undispatch(local_out, key=key).backward(grad_total_out)
+                return local_out.detach(), meta.lse, *(t.grad for t in leaves)
+
+            with record_bwd_kernels() as built:
+                out, lse, dq, dk, dv = run()
+                out_2, lse_2, dq_2, dk_2, dv_2 = run()
+
+        self.assertTrue(built)
+        self.assertEqual(
+            [kernel.deterministic for kernel in built], [True] * len(built)
+        )
+        self.assertTrue(torch.equal(out_2, out), "out differs between runs")
+        self.assertTrue(torch.equal(lse_2, lse), "lse differs between runs")
+        self.assertTrue(torch.equal(dq_2, dq), "dq differs between runs")
+        self.assertTrue(torch.equal(dk_2, dk), "dk differs between runs")
+        self.assertTrue(torch.equal(dv_2, dv), "dv differs between runs")
+
+        leaves = [
+            t.detach().clone().requires_grad_() for t in (total_q, total_k, total_v)
+        ]
+        total_out_ref, meta_ref = ref_attn_func(
+            *leaves,
+            mask=torch.ones(
+                total_seqlen, total_seqlen, device=self.device, dtype=torch.bool
+            ).tril(),
+            layout="thd",
+            backend="sdpa",
+            high_precision=True,
+            return_lse=True,
+        )
+        total_out_ref.backward(grad_total_out)
+        dq_ref, dk_ref, dv_ref = (t.grad for t in leaves)
+        assert_close(
+            undispatch(out, key=key),
+            total_out_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="out",
+        )
+        assert_close(
+            undispatch(lse, key=key),
+            meta_ref.lse,
+            atol=EPSILON,
+            rtol=5e-3,
+            mismatch_threshold=0.01,
+            test_case="lse",
+        )
+        assert_close(
+            undispatch(dq, key=key),
+            dq_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="dq",
+        )
+        assert_close(
+            undispatch(dk, key=key),
+            dk_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="dk",
+        )
+        assert_close(
+            undispatch(dv, key=key),
+            dv_ref,
+            atol=EPSILON,
+            rtol=5e-2,
+            mismatch_threshold=0.08,
+            test_case="dv",
+        )
 
 
 class TestInterfaceWithWorldSize5(TestInterfaceBaseWithWorldSize1):

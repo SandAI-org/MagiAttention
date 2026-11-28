@@ -305,14 +305,14 @@ Set the value of this env variable to control the minimum number of chunks per c
 - **Defaults to:** `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`
 - **Used by:** `magi_attention.env.comm.ffa_fwd_sm_margin_save_for_comm`
 
-Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels.
+Set the value of this env variable to control the number of SMs of the ffa forward kernel saved for comm kernels. Under the `cutedsl` kernel backend, the number of SMs minus this margin must hold one cluster of the launched kernel (two SMs for a 2-CTA kernel), otherwise the kernel raises `ValueError`.
 
 **MAGI_ATTENTION_FFA_BACKWARD_SM_MARGIN**
 
 - **Defaults to:** `4` if `CUDA_DEVICE_MAX_CONNECTIONS` > `1`, otherwise `0`
 - **Used by:** `magi_attention.env.comm.ffa_bwd_sm_margin_save_for_comm`
 
-Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels.
+Set the value of this env variable to control the number of SMs of the ffa backward kernel saved for comm kernels. Under the `cutedsl` kernel backend, the number of SMs minus this margin must hold one cluster of the launched kernel (two SMs for a 2-CTA kernel, such as the backward at `head_dim >= 128`), otherwise the kernel raises `ValueError`.
 
 **MAGI_ATTENTION_CPP_BACKEND**
 
@@ -383,6 +383,8 @@ This is only supposed to be used for testing or debugging, since the performance
 - **Used by:** `magi_attention.env.general.is_deterministic_mode_enable`
 
 Toggle this env variable to `1` to enable deterministic mode to use deterministic algorithms for all magi_attention kernels.
+
+With the `cutedsl` kernel backend, deterministic q/k ranges require SM100/SM110 and `head_dim == head_dim_v` in {64, 128}; other configurations raise `NotImplementedError`. The kernels then launch persistent whatever `sm_margin`.
 
 
 **MAGI_ATTENTION_PROFILE_MODE**
