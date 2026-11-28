@@ -56,7 +56,7 @@ from magi_attention.testing.cutedsl_utils import (
     to_ranges_tensor,
 )
 from magi_attention.testing.dist_common import with_run_in_mp
-from magi_attention.testing.precision import assert_equal
+from magi_attention.testing.precision import assert_close, assert_equal
 
 # Unique-writer dK/dV, which the backward merge requires, is MHA-only.
 DTYPE = torch.bfloat16
@@ -533,15 +533,16 @@ class TestCuteDSLRangeMergeSyncAndGraph(TestCase):
             # deterministic=False, hence the per-case tolerance.
             assert_equal(got[0], eager[0], print_rank=-1, print_no_mismatch=False)
             assert_equal(got[1], eager[1], print_rank=-1, print_no_mismatch=False)
-            torch.testing.assert_close(
-                got[2].float(), eager[2].float(), atol=grad_tol, rtol=grad_tol
-            )
-            torch.testing.assert_close(
-                got[3].float(), eager[3].float(), atol=grad_tol, rtol=grad_tol
-            )
-            torch.testing.assert_close(
-                got[4].float(), eager[4].float(), atol=grad_tol, rtol=grad_tol
-            )
+            for idx, name in ((2, "dq"), (3, "dk"), (4, "dv")):
+                assert_close(
+                    got[idx].float(),
+                    eager[idx].float(),
+                    atol=grad_tol,
+                    rtol=grad_tol,
+                    test_case=f"{tag} => {name}",
+                    print_rank=-1,
+                    print_no_mismatch=False,
+                )
 
         replayed = assert_cuda_graph_matches_eager(
             run_fwd_bwd,

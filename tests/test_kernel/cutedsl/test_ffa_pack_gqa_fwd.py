@@ -30,6 +30,7 @@ from magi_attention.testing.cutedsl_utils import (
     overlapping_relations,
     record_fwd_kernels,
 )
+from magi_attention.testing.precision import assert_close
 from magi_attention.utils import make_attn_mask_from_ffa_args
 
 _TILE_M = 128
@@ -506,11 +507,19 @@ class TestFFAPackGqaFwd(TestCase):
                 )
             (kernel,) = built
             self.assertEqual(kernel.pack_gqa, pack_expected, (group, pack))
-            torch.testing.assert_close(
-                out[covered], out_ref[covered], atol=_TOL, rtol=_TOL
+            assert_close(
+                out[covered],
+                out_ref[covered],
+                atol=_TOL,
+                rtol=_TOL,
+                print_no_mismatch=False,
             )
-            torch.testing.assert_close(
-                lse[covered], lse_ref[covered], atol=1e-3, rtol=1e-3
+            assert_close(
+                lse[covered],
+                lse_ref[covered],
+                atol=1e-3,
+                rtol=1e-3,
+                print_no_mismatch=False,
             )
 
         dense = ([0, total_q], [0, total_k], MT_MAP.full)
@@ -521,7 +530,9 @@ class TestFFAPackGqaFwd(TestCase):
             )
         (kernel,) = built
         self.assertEqual(kernel.pack_gqa, expected, group)
-        torch.testing.assert_close(out[0].float(), out_ref, atol=2e-2, rtol=2e-2)
+        assert_close(
+            out[0].float(), out_ref, atol=2e-2, rtol=2e-2, print_no_mismatch=False
+        )
         self._log_ran(f"direct-store default G={group} packed={expected}")
 
     def test_packed_atomic_fwd_rejects_group_not_dividing_tile_m(self):

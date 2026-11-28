@@ -982,7 +982,7 @@ def bwd_postprocess_rowmajor(
     scale: float,
     accumulate: bool = False,
 ) -> None:
-    """Row-major accumulator -> output dtype (non-deterministic range path).
+    """Row-major accumulator -> output dtype (SM100/SM110 range path).
 
     With ``accumulate`` the scaled accumulator is added onto ``output`` in place
     for every row in ``[0, total)``; ``accum`` must be zero outside ``ranges``.

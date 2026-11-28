@@ -46,6 +46,7 @@ from magi_attention.testing.cutedsl_utils import (
     torch_reference_out_lse,
 )
 from magi_attention.testing.dist_common import with_run_in_mp
+from magi_attention.testing.precision import assert_equal
 
 DTYPE = torch.bfloat16
 
@@ -690,8 +691,12 @@ class TestPersistentSmMargin(CuteDSLDistTestBase):
             out, lse = run(num_ranges)
             self.assertEqual(len(built), 1, f"{test_case} => shared kernel")
 
-        torch.testing.assert_close(out, out_ref, rtol=0, atol=0)
-        torch.testing.assert_close(lse, lse_ref, rtol=0, atol=0)
+        assert_equal(
+            out, out_ref, test_case=f"{test_case} => out", print_no_mismatch=False
+        )
+        assert_equal(
+            lse, lse_ref, test_case=f"{test_case} => lse", print_no_mismatch=False
+        )
 
 
 if __name__ == "__main__":
